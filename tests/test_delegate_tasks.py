@@ -229,6 +229,85 @@ def test_normalized_command_parts_resolve_windows_cmd_shims(tmp_path: Path, monk
     assert Path(parts[0]).name.lower() == f"{command_name}.cmd"
 
 
+def test_build_exec_invocation_resolves_windows_codex_shim(tmp_path: Path, monkeypatch) -> None:
+    registry = ExecutorRegistry(
+        store=TaskStore(tmp_path / "state"),
+        codex_command="codex",
+        claude_command="claude",
+    )
+    shim_path = r"C:\Users\test\AppData\Local\Programs\Codex\bin\codex.cmd"
+
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr("notion_local_ops_mcp.executors.shutil.which", lambda binary: shim_path if binary == "codex" else None)
+    monkeypatch.setattr(registry, "_is_git_repo", lambda cwd: False)
+
+    invocation = registry._build_exec_invocation(
+        executor_name="codex",
+        command="codex",
+        cwd=tmp_path,
+        task="Fix Windows startup",
+        goal=None,
+        instructions=None,
+        context_files=[],
+        acceptance_criteria=[],
+        verification_commands=[],
+        commit_mode="allowed",
+        model=None,
+    )
+
+    assert invocation.use_shell is False
+    assert isinstance(invocation.args, list)
+    assert invocation.args[0] == shim_path
+    assert invocation.args[1:4] == ["exec", "--dangerously-bypass-approvals-and-sandbox", "-C"]
+
+
+def test_build_exec_invocation_resolves_windows_claude_shim(tmp_path: Path, monkeypatch) -> None:
+    registry = ExecutorRegistry(
+        store=TaskStore(tmp_path / "state"),
+        codex_command="codex",
+        claude_command="claude",
+    )
+    shim_path = r"C:\Users\test\AppData\Local\Programs\Claude\bin\claude.cmd"
+
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr("notion_local_ops_mcp.executors.shutil.which", lambda binary: shim_path if binary == "claude" else None)
+
+    invocation = registry._build_exec_invocation(
+        executor_name="claude-code",
+        command="claude",
+        cwd=tmp_path,
+        task="Fix Windows startup",
+        goal=None,
+        instructions=None,
+        context_files=[],
+        acceptance_criteria=[],
+        verification_commands=[],
+        commit_mode="allowed",
+        model=None,
+    )
+
+    assert invocation.use_shell is False
+    assert isinstance(invocation.args, list)
+    assert invocation.args[0] == shim_path
+    assert invocation.args[1:4] == ["--print", "--dangerously-skip-permissions", "--permission-mode"]
+
+
+def test_submitted_task_replaces_invalid_utf8_output(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        codex_command=python_command(
+            "import sys; sys.stdout.buffer.write(b'done \\xff'); sys.stderr.buffer.write(b'warn \\xff')"
+        ),
+    )
+
+    task = registry.submit(task="utf8", executor="codex", cwd=tmp_path, timeout=5)
+    result = registry.wait(task["task_id"], timeout=2, poll_interval=0.05)
+
+    assert result["status"] == "succeeded"
+    assert "done �" in result["stdout_tail"]
+    assert "warn �" in result["stderr_tail"]
+
+
 def test_submit_returns_structured_error_for_unsupported_executor(tmp_path: Path) -> None:
     registry = _build_registry(tmp_path)
 

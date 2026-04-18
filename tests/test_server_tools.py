@@ -16,6 +16,7 @@ def test_server_tool_surface_includes_explicit_delegate_tools() -> None:
     names = {tool.name for tool in tools}
 
     assert {
+        "list_skills",
         "delegate_task",
         "delegate_doctor",
         "codex_exec",

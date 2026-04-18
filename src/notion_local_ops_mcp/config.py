@@ -21,5 +21,8 @@ DELEGATE_TIMEOUT = int(os.environ.get("NOTION_LOCAL_OPS_DELEGATE_TIMEOUT", "1800
 
 
 def ensure_runtime_directories() -> None:
-    WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+    if not WORKSPACE_ROOT.exists():
+        raise FileNotFoundError(f"Workspace root does not exist: {WORKSPACE_ROOT}")
+    if not WORKSPACE_ROOT.is_dir():
+        raise NotADirectoryError(f"Workspace root is not a directory: {WORKSPACE_ROOT}")
     STATE_DIR.mkdir(parents=True, exist_ok=True)

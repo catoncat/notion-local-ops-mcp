@@ -7,6 +7,7 @@ Use Notion AI with your local files, shell, and fallback local agents.
 
 ## What It Provides
 
+- `list_skills`
 - `list_files`
 - `glob_files`
 - `grep_files`
@@ -41,6 +42,8 @@ Recommended executor flow:
 
 Review ranges default to **per-commit slicing** so large diff reviews do not get stuffed into one payload.
 
+`list_skills` returns lightweight project/global skill summaries and scans `.agents/skills`, `.codex/skills`, and global `.claude/skills`.
+
 ## Requirements
 
 - Python 3.11+
@@ -66,6 +69,8 @@ Edit `.env` and set at least:
 NOTION_LOCAL_OPS_WORKSPACE_ROOT="/absolute/path/to/workspace"
 NOTION_LOCAL_OPS_AUTH_TOKEN="replace-me"
 ```
+
+`NOTION_LOCAL_OPS_WORKSPACE_ROOT` must already exist as a directory before startup; the server no longer auto-creates it.
 
 Then run:
 
@@ -299,7 +304,7 @@ Recommended agent instruction:
 Act like a coding agent, not a Notion page editor.
 When the context contains repo paths, filenames, code extensions, README, AGENTS.md, CLAUDE.md, or .cursorrules, treat "document", "file", "notes", and "instructions" as local files unless the user explicitly says Notion page, wiki, or workspace page.
 For local file changes, do not use <edit_reference>. Use local file tools and, when useful, verify with git_diff, git_status, or tests.
-Use direct tools first: glob_files, grep_files, read_file, read_files, replace_in_file, write_file, apply_patch, git_status, git_diff, git_commit, git_log, run_command.
+Use direct tools first: list_skills, glob_files, grep_files, read_file, read_files, replace_in_file, write_file, apply_patch, git_status, git_diff, git_commit, git_log, run_command.
 Use list_files only when directory structure itself matters, and paginate with limit/offset instead of assuming full output.
 Use search_files only for simple substring search when regex or context is unnecessary.
 Use read_files when you need a few files at once after search or glob discovery.
@@ -339,6 +344,7 @@ Working style:
 
 Tool strategy:
 - In coding tasks, search the local repo first. Do not default to searching the Notion workspace.
+- list_skills: inspect project/global skill summaries when agent capabilities or skill locations matter.
 - glob_files: narrow candidate paths by pattern.
 - grep_files: search code or text with regex, glob filtering, and output modes.
 - list_files: inspect directory structure only when structure matters; paginate with limit and offset when needed.
@@ -412,6 +418,7 @@ Output style:
 - `git_commit`: stage selected paths or all changes and create a commit
 - `git_log`: recent commit history
 - `run_command`: run local shell commands, optionally in background
+- `list_skills`: summarize project/global skills and their source roots without loading full skill bodies
 - `delegate_doctor`: check local codex/claude readiness, git visibility, and external MCP auth warnings
 - `codex_exec` / `claude_exec` / `claudecode_exec`: explicit executor entrypoints with structured task metadata
 - `codex_review` / `claude_review`: explicit review entrypoints; commit ranges default to per-commit slicing
@@ -437,6 +444,7 @@ python -m compileall src tests
 - Check the auth type is `Bearer`
 - Check the token matches `NOTION_LOCAL_OPS_AUTH_TOKEN`
 - Check `cloudflared` is still running
+- Check `NOTION_LOCAL_OPS_WORKSPACE_ROOT` already exists and is a directory
 
 ### `/mcp` works locally but not over tunnel
 

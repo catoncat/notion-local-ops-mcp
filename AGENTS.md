@@ -25,6 +25,7 @@ src/notion_local_ops_mcp/
 ├── files.py       # list_files, read_file, write_file, replace_in_file
 ├── search.py      # search_files — text search with glob filtering
 ├── shell.py       # run_command — subprocess with timeout
+├── skills.py      # list_skills — summarize project/global skills without loading full content
 ├── tasks.py       # TaskStore — persistent task metadata & logs on disk
 └── executors.py   # ExecutorRegistry — async exec/review dispatch via codex / claude-code
 ```
@@ -33,6 +34,7 @@ src/notion_local_ops_mcp/
 
 | Tool | Purpose |
 |---|---|
+| `list_skills` | List project/global skill summaries and their source paths |
 | `list_files` | List directory contents (flat or recursive) |
 | `search_files` | Grep-like text search across files |
 | `read_file` | Read file content with optional line offset/limit |
@@ -45,12 +47,14 @@ src/notion_local_ops_mcp/
 | `delegate_task` | Backward-compatible fallback entry for executor tasks |
 | `get_task` | Poll status / output of a delegated task |
 | `list_tasks` | List recent delegated/background tasks with filters |
+| `wait_task` | Block until a delegated/background task finishes or times out |
 | `cancel_task` | Cancel a running delegated task |
 
 ## Key concepts
 
-- **WORKSPACE_ROOT** — All relative paths resolve against this directory. Set via `NOTION_LOCAL_OPS_WORKSPACE_ROOT` env var; defaults to `$HOME`.
+- **WORKSPACE_ROOT** — All relative paths resolve against this directory. Set via `NOTION_LOCAL_OPS_WORKSPACE_ROOT` env var; defaults to `$HOME`, but it **must already exist** and be a directory at startup.
 - **Bearer auth** — Optional `NOTION_LOCAL_OPS_AUTH_TOKEN`; if set, every request must include a matching `Authorization: Bearer <token>` header.
+- **Skill discovery** — `list_skills` scans project and global roots: `.agents/skills`, `.codex/skills`, and global `.claude/skills`, then returns lightweight summaries only.
 - **Delegate executors** — Prefer explicit tools (`codex_exec`, `claude_exec`, `codex_review`, `delegate_doctor`). `delegate_task` stays for compatibility. Executors can be chosen as `auto`, `codex`, `claude`, `claudecode`, or `claude-code`. Task state is persisted under `STATE_DIR/tasks/<id>/`.
 - **Review mode** — `codex_review` uses native `codex exec review` where possible. Commit ranges default to **per-commit slicing** to avoid oversized payloads.
 - **Public vs local endpoint** — `127.0.0.1:8766/mcp` is the local origin only. Notion should use the public HTTPS Cloudflare URL ending in `/mcp`, which tunnels back to the local origin.

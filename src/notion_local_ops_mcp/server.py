@@ -37,6 +37,7 @@ from .search import glob_files as glob_files_impl
 from .search import grep_files as grep_files_impl
 from .search import search_files as search_files_impl
 from .shell import run_command as run_command_impl
+from .skills import list_skills as list_skills_impl
 from .tasks import TaskStore
 
 
@@ -69,13 +70,31 @@ registry = ExecutorRegistry(
 mcp = FastMCP(
     APP_NAME,
     instructions=(
-        "Use direct tools first for normal tasks: list/glob/grep/read/replace/write/patch/git/run. "
+        "Use direct tools first for normal tasks: list/glob/grep/read/replace/write/patch/git/run/list_skills. "
         "Prefer explicit delegate tools for executor work: delegate_doctor, codex_exec, claude_exec, "
         "claudecode_exec, codex_review, claude_review, and list_tasks. "
         "Keep delegate_task only as the compatibility fallback."
     ),
     middleware=[BearerAuthMiddleware()],
 )
+
+
+@mcp.tool(
+    name="list_skills",
+    description=(
+        "List project and global agent skills as lightweight summaries. "
+        "Returns skill name, description, preferred path, and source locations."
+    ),
+)
+def list_skills(
+    include_project: bool = True,
+    include_global: bool = True,
+) -> dict[str, object]:
+    return list_skills_impl(
+        workspace_root=WORKSPACE_ROOT,
+        include_project=include_project,
+        include_global=include_global,
+    )
 
 
 @mcp.tool(
