@@ -221,7 +221,7 @@ if ! wait_for_server; then
   exit 1
 fi
 
-echo "MCP SSE endpoint: ${SERVER_URL}/mcp"
+echo "MCP streamable HTTP endpoint: ${SERVER_URL}/mcp"
 echo "Workspace root: ${NOTION_LOCAL_OPS_WORKSPACE_ROOT}"
 echo "Server log: ${SERVER_LOG}"
 

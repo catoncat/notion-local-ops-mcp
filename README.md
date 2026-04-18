@@ -21,12 +21,25 @@ Use Notion AI with your local files, shell, and fallback local agents.
 - `git_commit`
 - `git_log`
 - `run_command`
+- `delegate_doctor`
+- `codex_exec`
+- `claude_exec`
+- `claudecode_exec`
+- `codex_review`
+- `claude_review`
 - `delegate_task`
 - `get_task`
+- `list_tasks`
 - `wait_task`
 - `cancel_task`
 
-`delegate_task` supports local `codex` and `claude` CLIs with structured task envelopes.
+Recommended executor flow:
+
+- use `delegate_doctor` first when codex/claude execution looks broken
+- prefer `codex_exec` / `claude_exec` / `codex_review` / `claude_review`
+- keep `delegate_task` only as the backward-compatible fallback
+
+Review ranges default to **per-commit slicing** so large diff reviews do not get stuffed into one payload.
 
 ## Requirements
 
@@ -60,6 +73,12 @@ Then run:
 ./scripts/dev-tunnel.sh
 ```
 
+On Windows PowerShell, use:
+
+```powershell
+.\scripts\dev-tunnel.ps1
+```
+
 What you should expect:
 
 - the script creates or reuses `.venv`
@@ -69,6 +88,12 @@ What you should expect:
 - otherwise it falls back to a `cloudflared` quick tunnel and prints a public HTTPS URL
 
 Use the printed tunnel URL with `/mcp` appended in Notion, and use `NOTION_LOCAL_OPS_AUTH_TOKEN` as the Bearer token.
+
+Important:
+
+- `http://127.0.0.1:8766/mcp` is your **local origin**
+- Notion should use the **public HTTPS Cloudflare URL** ending in `/mcp`
+- if the tunnel restarts, reconnect the Notion MCP entry so it picks up the new public URL
 
 ## Manual Install
 
@@ -80,6 +105,18 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e .
+```
+
+PowerShell equivalent:
+
+```powershell
+git clone https://github.com/<your-account>/notion-local-ops-mcp.git
+cd notion-local-ops-mcp
+
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
 ## Configure
@@ -108,7 +145,14 @@ source .venv/bin/activate
 notion-local-ops-mcp
 ```
 
-Local endpoint:
+PowerShell equivalent:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+notion-local-ops-mcp
+```
+
+Local streamable HTTP endpoint:
 
 ```text
 http://127.0.0.1:8766/mcp
@@ -120,6 +164,37 @@ Recommended local workflow:
 
 ```bash
 ./scripts/dev-tunnel.sh
+```
+
+PowerShell equivalent:
+
+```powershell
+.\scripts\dev-tunnel.ps1
+```
+
+For a detached one-click quick tunnel on Windows PowerShell:
+
+```powershell
+.\scripts\quick-start.ps1
+```
+
+Useful helpers:
+
+```powershell
+.\scripts\quick-status.ps1
+.\scripts\quick-stop.ps1
+```
+
+If you need two separate MCP endpoints for two Notion agents at the same time:
+
+```powershell
+.\scripts\quick-start-dual.ps1
+```
+
+Optional matching stop helper:
+
+```powershell
+.\scripts\quick-stop-dual.ps1
 ```
 
 What it does:
@@ -137,7 +212,46 @@ Notes:
 - `cloudflared.local.yml` is gitignored, so your local named tunnel config stays out of git
 - if `NOTION_LOCAL_OPS_WORKSPACE_ROOT` is unset, the script defaults it to the repo root
 - if `NOTION_LOCAL_OPS_AUTH_TOKEN` is unset, the script exits with an error instead of guessing
+- the MCP transport at `/mcp` is **streamable HTTP**, not legacy SSE
+- Notion never connects directly to `127.0.0.1`; it connects to the Cloudflare HTTPS `/mcp` URL that forwards to the local origin
 - for a fresh clone, you do not need to run `pip install` manually before using this script
+
+## One-Command Dual-Agent Quick Tunnels
+
+If you want two Notion agents to use this MCP server concurrently, start two isolated instances instead of sharing one endpoint:
+
+```powershell
+.\scripts\quick-start-dual.ps1
+```
+
+Defaults:
+
+- first instance: port `8766`, token from `NOTION_LOCAL_OPS_AUTH_TOKEN`
+- second instance: port `8767`, token from `NOTION_LOCAL_OPS_AUTH_TOKEN_SECOND` if present
+- if `NOTION_LOCAL_OPS_AUTH_TOKEN_SECOND` is missing, the script generates a random second token for you
+
+Optional overrides:
+
+```powershell
+.\scripts\quick-start-dual.ps1 `
+  -FirstPort 8766 `
+  -SecondPort 9876 `
+  -FirstToken "agent-a-token" `
+  -SecondToken "agent-b-token"
+```
+
+What it does:
+
+- starts two local MCP server processes with separate ports, bearer tokens, and state directories
+- opens one cloudflared quick tunnel per instance
+- prints two Notion-ready MCP URLs
+- writes process and log metadata to `.state\quick-dual-tunnel-state.json`
+
+To stop both instances later:
+
+```powershell
+.\scripts\quick-stop-dual.ps1
+```
 
 ## Expose With cloudflared
 
@@ -156,6 +270,13 @@ Copy [`cloudflared-example.yml`](./cloudflared-example.yml) to `cloudflared.loca
 ```bash
 cp cloudflared-example.yml cloudflared.local.yml
 ./scripts/dev-tunnel.sh
+```
+
+PowerShell equivalent:
+
+```powershell
+Copy-Item cloudflared-example.yml cloudflared.local.yml
+.\scripts\dev-tunnel.ps1
 ```
 
 Or run cloudflared manually:
@@ -291,8 +412,12 @@ Output style:
 - `git_commit`: stage selected paths or all changes and create a commit
 - `git_log`: recent commit history
 - `run_command`: run local shell commands, optionally in background
-- `delegate_task`: send a task to local `codex` or `claude`, with optional `goal`, `acceptance_criteria`, `verification_commands`, and `commit_mode`
+- `delegate_doctor`: check local codex/claude readiness, git visibility, and external MCP auth warnings
+- `codex_exec` / `claude_exec` / `claudecode_exec`: explicit executor entrypoints with structured task metadata
+- `codex_review` / `claude_review`: explicit review entrypoints; commit ranges default to per-commit slicing
+- `delegate_task`: backward-compatible fallback to local `codex` or `claude`, with optional `goal`, `instructions`, `acceptance_criteria`, `verification_commands`, and `commit_mode`
 - `get_task`: read task status and output tail
+- `list_tasks`: list recent delegated/background tasks with optional filters
 - `wait_task`: block until a delegated or background shell task completes or times out
 - `cancel_task`: stop a delegated or background shell task
 
@@ -313,13 +438,27 @@ python -m compileall src tests
 - Check the token matches `NOTION_LOCAL_OPS_AUTH_TOKEN`
 - Check `cloudflared` is still running
 
-### SSE path works locally but not over tunnel
+### `/mcp` works locally but not over tunnel
 
+- This server uses **streamable HTTP**, not legacy SSE
 - Retry with a named tunnel instead of a quick tunnel
-- Confirm `GET /mcp` returns `text/event-stream`
+- A plain browser `GET /mcp` can return `406` or `405` if the request is not MCP-shaped; that alone does not mean the server is down
+- Validate with an MCP-capable client or by reconnecting the Notion MCP integration after the tunnel URL changes
+
+### Two Notion agents keep colliding
+
+- Do not point two agents at the same quick-tunnel MCP URL if one of them is already mid-session
+- Prefer two isolated endpoints by running `.\scripts\quick-start-dual.ps1`
+- Give each Notion agent its own URL and bearer token pair
+- If one agent still shows stale tools, disconnect and reconnect that MCP entry in Notion
 
 ### `delegate_task` fails
 
+- Run `delegate_doctor` first
 - Check `codex --help`
+- Check `codex exec review --help`
 - Check `claude --help`
 - Set `NOTION_LOCAL_OPS_CODEX_COMMAND` or `NOTION_LOCAL_OPS_CLAUDE_COMMAND` if needed
+- Prefer `codex_exec` / `claude_exec` / `codex_review` / `claude_review` over raw `delegate_task`
+- Use `goal`, `instructions`, `acceptance_criteria`, `verification_commands`, and `commit_mode`
+- For commit ranges, keep the default per-commit slicing unless you explicitly need `split_strategy="single"`

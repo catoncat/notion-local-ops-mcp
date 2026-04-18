@@ -1,11 +1,12 @@
 from pathlib import Path
 
 from notion_local_ops_mcp.shell import run_command
+from tests.helpers import python_command
 
 
 def test_run_command_returns_stdout_and_exit_code(tmp_path: Path) -> None:
     result = run_command(
-        command="python3 -c \"print('hello')\"",
+        command=python_command("print('hello')"),
         cwd=tmp_path,
         timeout=5,
     )

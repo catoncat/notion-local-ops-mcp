@@ -1,8 +1,11 @@
 .venv/
 .env
 .env.local
+.state/
 cloudflared.local.yml
 cloudflared.local.yaml
+tools/cloudflared.exe
+.chrome-debug-profile*/
 .pytest_cache/
 __pycache__/
 *.pyc

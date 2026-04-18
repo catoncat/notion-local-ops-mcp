@@ -113,7 +113,7 @@ def read_files(
 
 def write_file(path: Path, *, content: str) -> dict[str, object]:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    path.write_bytes(content.encode("utf-8"))
     return {
         "success": True,
         "path": str(path),
@@ -150,7 +150,7 @@ def replace_in_file(
         )
 
     replacements = occurrences if replace_all else 1
-    path.write_text(original.replace(old_text, new_text, replacements), encoding="utf-8")
+    path.write_bytes(original.replace(old_text, new_text, replacements).encode("utf-8"))
     return {
         "success": True,
         "path": str(path),

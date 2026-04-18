@@ -70,7 +70,9 @@ mcp = FastMCP(
     APP_NAME,
     instructions=(
         "Use direct tools first for normal tasks: list/glob/grep/read/replace/write/patch/git/run. "
-        "Use delegate_task only when direct tools are insufficient for a complex, long-running, or multi-file task."
+        "Prefer explicit delegate tools for executor work: delegate_doctor, codex_exec, claude_exec, "
+        "claudecode_exec, codex_review, claude_review, and list_tasks. "
+        "Keep delegate_task only as the compatibility fallback."
     ),
     middleware=[BearerAuthMiddleware()],
 )
@@ -285,27 +287,43 @@ def run_command(
 
 
 @mcp.tool(
-    name="delegate_task",
-    description=(
-        "Fallback only. Use this when direct tools are insufficient for a complex, long-running, or "
-        "multi-file task. Supported executors: auto, codex, claude-code."
-    ),
+    name="delegate_doctor",
+    description="Run local preflight checks for codex/claude executor health, git state, and MCP auth warnings.",
 )
-def delegate_task(
-    task: str | None = None,
-    goal: str | None = None,
-    executor: str = "auto",
+def delegate_doctor(
     cwd: str | None = None,
-    context_files: list[str] | None = None,
-    acceptance_criteria: list[str] | None = None,
-    verification_commands: list[str] | None = None,
-    commit_mode: str = "allowed",
-    timeout: int | None = None,
+    executor: str = "auto",
+    check_git: bool = True,
+    check_mcp_auth: bool = True,
+) -> dict[str, object]:
+    resolved_cwd = resolve_cwd(cwd, WORKSPACE_ROOT)
+    return registry.doctor(
+        cwd=resolved_cwd,
+        executor=executor,
+        check_git=check_git,
+        check_mcp_auth=check_mcp_auth,
+    )
+
+
+def _submit_exec_tool(
+    *,
+    executor: str,
+    task: str | None,
+    goal: str | None,
+    instructions: str | None,
+    cwd: str | None,
+    context_files: list[str] | None,
+    acceptance_criteria: list[str] | None,
+    verification_commands: list[str] | None,
+    commit_mode: str,
+    timeout: int | None,
+    model: str | None,
 ) -> dict[str, object]:
     resolved_cwd = resolve_cwd(cwd, WORKSPACE_ROOT)
     return registry.submit(
         task=task,
         goal=goal,
+        instructions=instructions,
         executor=executor,
         cwd=resolved_cwd,
         timeout=timeout if timeout is not None else DELEGATE_TIMEOUT,
@@ -313,6 +331,256 @@ def delegate_task(
         acceptance_criteria=acceptance_criteria,
         verification_commands=verification_commands,
         commit_mode=commit_mode,
+        model=model,
+    )
+
+
+def _submit_review_tool(
+    *,
+    executor: str,
+    task: str | None,
+    goal: str | None,
+    instructions: str | None,
+    cwd: str | None,
+    context_files: list[str] | None,
+    acceptance_criteria: list[str] | None,
+    verification_commands: list[str] | None,
+    commit_mode: str,
+    timeout: int | None,
+    model: str | None,
+    commit: str | None,
+    base_ref: str | None,
+    head_ref: str | None,
+    uncommitted: bool,
+    split_strategy: str,
+) -> dict[str, object]:
+    resolved_cwd = resolve_cwd(cwd, WORKSPACE_ROOT)
+    return registry.submit_review(
+        executor=executor,
+        cwd=resolved_cwd,
+        timeout=timeout if timeout is not None else DELEGATE_TIMEOUT,
+        task=task,
+        goal=goal,
+        instructions=instructions,
+        context_files=context_files,
+        acceptance_criteria=acceptance_criteria,
+        verification_commands=verification_commands,
+        commit_mode=commit_mode,
+        model=model,
+        commit=commit,
+        base_ref=base_ref,
+        head_ref=head_ref,
+        uncommitted=uncommitted,
+        split_strategy=split_strategy,
+    )
+
+
+@mcp.tool(
+    name="codex_exec",
+    description="Queue a long-running codex task with explicit schema and structured task metadata.",
+)
+def codex_exec(
+    task: str | None = None,
+    goal: str | None = None,
+    instructions: str | None = None,
+    cwd: str | None = None,
+    context_files: list[str] | None = None,
+    acceptance_criteria: list[str] | None = None,
+    verification_commands: list[str] | None = None,
+    commit_mode: str = "allowed",
+    timeout: int | None = None,
+    model: str | None = None,
+) -> dict[str, object]:
+    return _submit_exec_tool(
+        executor="codex",
+        task=task,
+        goal=goal,
+        instructions=instructions,
+        cwd=cwd,
+        context_files=context_files,
+        acceptance_criteria=acceptance_criteria,
+        verification_commands=verification_commands,
+        commit_mode=commit_mode,
+        timeout=timeout,
+        model=model,
+    )
+
+
+@mcp.tool(
+    name="claude_exec",
+    description="Queue a long-running Claude Code task with explicit schema and structured task metadata.",
+)
+def claude_exec(
+    task: str | None = None,
+    goal: str | None = None,
+    instructions: str | None = None,
+    cwd: str | None = None,
+    context_files: list[str] | None = None,
+    acceptance_criteria: list[str] | None = None,
+    verification_commands: list[str] | None = None,
+    commit_mode: str = "allowed",
+    timeout: int | None = None,
+    model: str | None = None,
+) -> dict[str, object]:
+    return _submit_exec_tool(
+        executor="claude-code",
+        task=task,
+        goal=goal,
+        instructions=instructions,
+        cwd=cwd,
+        context_files=context_files,
+        acceptance_criteria=acceptance_criteria,
+        verification_commands=verification_commands,
+        commit_mode=commit_mode,
+        timeout=timeout,
+        model=model,
+    )
+
+
+@mcp.tool(
+    name="claudecode_exec",
+    description="Compatibility alias for claude_exec using the legacy claudecode naming.",
+)
+def claudecode_exec(
+    task: str | None = None,
+    goal: str | None = None,
+    instructions: str | None = None,
+    cwd: str | None = None,
+    context_files: list[str] | None = None,
+    acceptance_criteria: list[str] | None = None,
+    verification_commands: list[str] | None = None,
+    commit_mode: str = "allowed",
+    timeout: int | None = None,
+    model: str | None = None,
+) -> dict[str, object]:
+    return claude_exec(
+        task=task,
+        goal=goal,
+        instructions=instructions,
+        cwd=cwd,
+        context_files=context_files,
+        acceptance_criteria=acceptance_criteria,
+        verification_commands=verification_commands,
+        commit_mode=commit_mode,
+        timeout=timeout,
+        model=model,
+    )
+
+
+@mcp.tool(
+    name="codex_review",
+    description="Queue a codex-native code review. Commit ranges default to per-commit slicing.",
+)
+def codex_review(
+    task: str | None = None,
+    goal: str | None = None,
+    instructions: str | None = None,
+    cwd: str | None = None,
+    context_files: list[str] | None = None,
+    acceptance_criteria: list[str] | None = None,
+    verification_commands: list[str] | None = None,
+    commit_mode: str = "forbidden",
+    timeout: int | None = None,
+    model: str | None = None,
+    commit: str | None = None,
+    base_ref: str | None = None,
+    head_ref: str | None = None,
+    uncommitted: bool = False,
+    split_strategy: str = "by_commit",
+) -> dict[str, object]:
+    return _submit_review_tool(
+        executor="codex",
+        task=task,
+        goal=goal,
+        instructions=instructions,
+        cwd=cwd,
+        context_files=context_files,
+        acceptance_criteria=acceptance_criteria,
+        verification_commands=verification_commands,
+        commit_mode=commit_mode,
+        timeout=timeout,
+        model=model,
+        commit=commit,
+        base_ref=base_ref,
+        head_ref=head_ref,
+        uncommitted=uncommitted,
+        split_strategy=split_strategy,
+    )
+
+
+@mcp.tool(
+    name="claude_review",
+    description="Queue a Claude Code review. Commit ranges default to per-commit slicing.",
+)
+def claude_review(
+    task: str | None = None,
+    goal: str | None = None,
+    instructions: str | None = None,
+    cwd: str | None = None,
+    context_files: list[str] | None = None,
+    acceptance_criteria: list[str] | None = None,
+    verification_commands: list[str] | None = None,
+    commit_mode: str = "forbidden",
+    timeout: int | None = None,
+    model: str | None = None,
+    commit: str | None = None,
+    base_ref: str | None = None,
+    head_ref: str | None = None,
+    uncommitted: bool = False,
+    split_strategy: str = "by_commit",
+) -> dict[str, object]:
+    return _submit_review_tool(
+        executor="claude-code",
+        task=task,
+        goal=goal,
+        instructions=instructions,
+        cwd=cwd,
+        context_files=context_files,
+        acceptance_criteria=acceptance_criteria,
+        verification_commands=verification_commands,
+        commit_mode=commit_mode,
+        timeout=timeout,
+        model=model,
+        commit=commit,
+        base_ref=base_ref,
+        head_ref=head_ref,
+        uncommitted=uncommitted,
+        split_strategy=split_strategy,
+    )
+
+
+@mcp.tool(
+    name="delegate_task",
+    description=(
+        "Fallback only. Use this when direct tools are insufficient for a complex, long-running, or "
+        "multi-file task. Supported executors: auto, codex, claude, claudecode, claude-code."
+    ),
+)
+def delegate_task(
+    task: str | None = None,
+    goal: str | None = None,
+    instructions: str | None = None,
+    executor: str = "auto",
+    cwd: str | None = None,
+    context_files: list[str] | None = None,
+    acceptance_criteria: list[str] | None = None,
+    verification_commands: list[str] | None = None,
+    commit_mode: str = "allowed",
+    timeout: int | None = None,
+    model: str | None = None,
+) -> dict[str, object]:
+    return _submit_exec_tool(
+        executor=executor,
+        task=task,
+        goal=goal,
+        instructions=instructions,
+        cwd=cwd,
+        context_files=context_files,
+        acceptance_criteria=acceptance_criteria,
+        verification_commands=verification_commands,
+        commit_mode=commit_mode,
+        timeout=timeout,
+        model=model,
     )
 
 
@@ -322,6 +590,19 @@ def delegate_task(
 )
 def get_task(task_id: str) -> dict[str, object]:
     return registry.get(task_id)
+
+
+@mcp.tool(
+    name="list_tasks",
+    description="List recent delegated or background shell tasks with optional status/executor filters.",
+)
+def list_tasks(
+    limit: int = 50,
+    offset: int = 0,
+    status: str | None = None,
+    executor: str | None = None,
+) -> dict[str, object]:
+    return registry.list_tasks(limit=limit, offset=offset, status=status, executor=executor)
 
 
 @mcp.tool(
@@ -343,7 +624,7 @@ def cancel_task(task_id: str) -> dict[str, object]:
 def build_http_app():
     return mcp.http_app(
         path="/mcp",
-        transport="sse",
+        transport="http",
     )
 
 
@@ -352,8 +633,8 @@ def main() -> None:
     print(f"Starting {APP_NAME} on {HOST}:{PORT}")
     print(f"workspace_root={WORKSPACE_ROOT}")
     print(f"state_dir={STATE_DIR}")
-    print("sse_path=/mcp")
-    print("message_path=/messages/")
+    print("mcp_path=/mcp")
+    print("transport=streamable-http")
     app = build_http_app()
     uvicorn.run(app, host=HOST, port=PORT)
 
