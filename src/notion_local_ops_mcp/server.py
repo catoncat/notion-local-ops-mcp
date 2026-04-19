@@ -262,6 +262,34 @@ def apply_patch(
 
 
 @mcp.tool(
+    name="server_info",
+    description=(
+        "Return server metadata: app name, host/port, workspace root, state dir, "
+        "timeouts, auth mode, and the list of registered tools. Useful as a first "
+        "call to confirm which bridge you are connected to and what it can do."
+    ),
+)
+async def server_info() -> dict[str, object]:
+    registered = await mcp._list_tools()
+    tools = sorted(tool.name for tool in registered)
+    return {
+        "success": True,
+        "app_name": APP_NAME,
+        "host": HOST,
+        "port": PORT,
+        "workspace_root": str(WORKSPACE_ROOT),
+        "state_dir": str(STATE_DIR),
+        "command_timeout_seconds": COMMAND_TIMEOUT,
+        "delegate_timeout_seconds": DELEGATE_TIMEOUT,
+        "auth": "bearer" if AUTH_TOKEN else "none",
+        "codex_command": CODEX_COMMAND,
+        "claude_command": CLAUDE_COMMAND,
+        "tools": tools,
+        "tool_count": len(tools),
+    }
+
+
+@mcp.tool(
     name="git_status",
     description="Return structured git status for the repository at cwd or the current workspace root.",
 )
