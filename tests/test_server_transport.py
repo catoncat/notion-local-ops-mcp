@@ -153,16 +153,6 @@ def test_http_app_rejects_unauthenticated_plain_get(monkeypatch) -> None:
     assert response.status_code == 401
 
 
-def test_http_app_rejects_unauthenticated_head(monkeypatch) -> None:
-    monkeypatch.setattr(server, "AUTH_TOKEN", "secret-token")
-    app = build_http_app()
-
-    with TestClient(app) as client:
-        response = client.head("/mcp")
-
-    assert response.status_code == 401
-
-
 def test_http_app_rejects_unauthenticated_messages_post(monkeypatch) -> None:
     monkeypatch.setattr(server, "AUTH_TOKEN", "secret-token")
     app = build_http_app()
@@ -187,6 +177,17 @@ def test_http_app_allows_discovery_without_token(monkeypatch) -> None:
     assert response.status_code == 200
 
 
+def test_http_app_allows_unauthenticated_head_probe(monkeypatch) -> None:
+    monkeypatch.setattr(server, "AUTH_TOKEN", "secret-token")
+    app = build_http_app()
+
+    with TestClient(app) as client:
+        response = client.head("/mcp")
+
+    assert response.status_code == 204
+    assert response.headers["allow"] == "GET, POST, DELETE, HEAD, OPTIONS"
+
+
 def test_http_app_accepts_valid_bearer_on_head(monkeypatch) -> None:
     monkeypatch.setattr(server, "AUTH_TOKEN", "secret-token")
     app = build_http_app()
@@ -195,6 +196,16 @@ def test_http_app_accepts_valid_bearer_on_head(monkeypatch) -> None:
         response = client.head("/mcp", headers={"Authorization": "Bearer secret-token"})
 
     assert response.status_code == 204
+
+
+def test_http_app_does_not_require_auth_for_oauth_discovery_probe(monkeypatch) -> None:
+    monkeypatch.setattr(server, "AUTH_TOKEN", "secret-token")
+    app = build_http_app()
+
+    with TestClient(app) as client:
+        response = client.get("/.well-known/oauth-authorization-server")
+
+    assert response.status_code == 404
 
 
 def test_http_app_supports_legacy_sse_get_on_mcp(tmp_path, monkeypatch) -> None:

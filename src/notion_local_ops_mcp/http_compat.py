@@ -26,6 +26,7 @@ MCP_METHOD_HEADERS = {
 }
 LEGACY_SSE_MESSAGE_PATHS = {"/messages", "/messages/"}
 DISCOVERY_PATHS = {"/.well-known/mcp.json", "/.well-known/mcp/server-card.json"}
+OAUTH_DISCOVERY_PATHS = {"/.well-known/oauth-authorization-server"}
 
 AuthTokenProvider = Callable[[], str]
 
@@ -80,8 +81,9 @@ class HTTPBearerAuthMiddleware:
     """HTTP-layer Bearer auth.
 
     Applied before any MCP/SSE transport handling so that unauthenticated clients
-    cannot open SSE sessions or queue legacy /messages payloads. Discovery paths
-    and OPTIONS preflights are always allowed.
+    cannot open SSE sessions or queue legacy /messages payloads. MCP discovery,
+    HEAD probes, OAuth discovery probes, and OPTIONS preflights are always
+    allowed.
     """
 
     def __init__(self, app: Any, get_auth_token: AuthTokenProvider) -> None:
@@ -95,7 +97,7 @@ class HTTPBearerAuthMiddleware:
 
         method = str(scope.get("method", "GET")).upper()
         path = str(scope.get("path", ""))
-        if method == "OPTIONS" or path in DISCOVERY_PATHS:
+        if method in {"OPTIONS", "HEAD"} or path in DISCOVERY_PATHS or path in OAUTH_DISCOVERY_PATHS:
             await self.app(scope, receive, send)
             return
 
@@ -237,10 +239,14 @@ def build_http_compat_app(
     async def server_card(_: Request) -> JSONResponse:
         return JSONResponse(dispatcher.server_card, headers=DISCOVERY_HEADERS)
 
+    async def oauth_discovery(_: Request) -> Response:
+        return Response(status_code=404, headers=DISCOVERY_HEADERS)
+
     app = Starlette(
         routes=[
             Route("/.well-known/mcp.json", endpoint=server_card, methods=["GET"]),
             Route("/.well-known/mcp/server-card.json", endpoint=server_card, methods=["GET"]),
+            Route("/.well-known/oauth-authorization-server", endpoint=oauth_discovery, methods=["GET"]),
             Mount("/", app=dispatcher),
         ],
         middleware=[
