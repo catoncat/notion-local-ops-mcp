@@ -59,6 +59,10 @@ def _read_text(path: Path) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def _write_text_exact(path: Path, content: str) -> None:
+    path.write_bytes(content.encode("utf-8"))
+
+
 def _render_lines(
     lines: list[str],
     *,
@@ -369,7 +373,7 @@ def read_files(
 def write_file(path: Path, *, content: str, dry_run: bool = False) -> dict[str, object]:
     if not dry_run:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        _write_text_exact(path, content)
     return {
         "success": True,
         "path": str(path),
@@ -476,7 +480,7 @@ def replace_in_file(
     replacements = occurrences if replace_all else 1
     replaced = original.replace(old_text, new_text, replacements)
     if not dry_run:
-        path.write_text(replaced, encoding="utf-8")
+        _write_text_exact(path, replaced)
     return {
         "success": True,
         "path": str(path),

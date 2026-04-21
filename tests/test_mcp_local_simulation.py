@@ -15,6 +15,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from notion_local_ops_mcp.executors import ExecutorRegistry
 from notion_local_ops_mcp.tasks import TaskStore
+from tests.helpers import python_json_cmd, python_print_cmd, python_sleep_cmd
 
 
 def _find_free_port() -> int:
@@ -29,8 +30,8 @@ def _running_server(
     monkeypatch,
     *,
     auth_token: str,
-    codex_command: str = "python -c \"print('codex')\"",
-    claude_command: str = "python -c \"print('claude')\"",
+    codex_command: str = python_print_cmd("codex"),
+    claude_command: str = python_print_cmd("claude"),
 ):
     from notion_local_ops_mcp import server
 
@@ -104,7 +105,7 @@ def test_mcp_run_command_stream_end_to_end(tmp_path: Path, monkeypatch) -> None:
                     session,
                     "run_command_stream",
                     {
-                        "command": "python -c \"print('stream-ok')\"",
+                        "command": python_print_cmd("stream-ok"),
                         "timeout": 5,
                     },
                 )
@@ -134,7 +135,7 @@ def test_mcp_run_command_stream_timeout_end_to_end(tmp_path: Path, monkeypatch) 
                     session,
                     "run_command_stream",
                     {
-                        "command": "python -c \"import time; time.sleep(2)\"",
+                        "command": python_sleep_cmd(2),
                         "timeout": 1,
                     },
                 )
@@ -160,7 +161,7 @@ def test_mcp_run_command_stream_timeout_end_to_end(tmp_path: Path, monkeypatch) 
 
 def test_mcp_delegate_task_structured_output_end_to_end(tmp_path: Path, monkeypatch) -> None:
     token = "secret-token"
-    codex_command = "python -c \"print('{\\\"ok\\\": true, \\\"source\\\": \\\"delegate\\\"}')\""
+    codex_command = python_json_cmd({"ok": True, "source": "delegate"})
     with _running_server(
         tmp_path,
         monkeypatch,

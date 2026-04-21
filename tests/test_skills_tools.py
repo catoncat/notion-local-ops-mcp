@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from notion_local_ops_mcp.skills import list_skills
+from tests.helpers import normalize_path_slashes
 
 
 def _write_skill(root: Path, folder: str, *, name: str, description: str) -> None:
@@ -46,7 +47,9 @@ def test_list_skills_discovers_project_and_global_roots(tmp_path: Path) -> None:
     assert result["success"] is True
     assert [skill["name"] for skill in result["skills"]] == ["global-helper", "project-helper"]
     project_skill = result["skills"][1]
-    assert project_skill["preferred_path"].endswith(".agents/skills/project-helper/SKILL.md")
+    assert normalize_path_slashes(project_skill["preferred_path"]).endswith(
+        ".agents/skills/project-helper/SKILL.md"
+    )
     assert project_skill["sources"] == [
         {
             "scope": "project",

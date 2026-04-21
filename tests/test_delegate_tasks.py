@@ -5,14 +5,15 @@ import pytest
 import notion_local_ops_mcp.executors as executors
 from notion_local_ops_mcp.executors import ExecutorRegistry, Invocation
 from notion_local_ops_mcp.tasks import TaskStore
+from tests.helpers import python_json_cmd, python_print_cmd, python_sleep_cmd
 
 
 def test_executor_registry_prefers_codex_when_present(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "state")
     registry = ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"print('codex')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
     )
 
     task = registry.submit(task="say hi", executor="auto", cwd=tmp_path, timeout=5)
@@ -34,8 +35,8 @@ def test_submitted_task_eventually_succeeds(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "state")
     registry = ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"print('done')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_print_cmd("done"),
+        claude_command=python_print_cmd("claude"),
     )
 
     task = registry.submit(task="finish", executor="codex", cwd=tmp_path, timeout=5)
@@ -55,8 +56,8 @@ def test_cancel_marks_long_running_task_cancelled(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "state")
     registry = ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"import time; time.sleep(2)\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_sleep_cmd(2),
+        claude_command=python_print_cmd("claude"),
     )
 
     task = registry.submit(task="cancel", executor="codex", cwd=tmp_path, timeout=5)
@@ -72,8 +73,8 @@ def test_wait_returns_completed_task_metadata(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "state")
     registry = ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"print('done')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_print_cmd("done"),
+        claude_command=python_print_cmd("claude"),
     )
 
     task = registry.submit(task="finish", executor="codex", cwd=tmp_path, timeout=5)
@@ -88,12 +89,12 @@ def test_submit_command_runs_shell_task_in_background(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "state")
     registry = ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"print('codex')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
     )
 
     task = registry.submit_command(
-        command="python3 -c \"print('shell')\"",
+        command=python_print_cmd("shell"),
         cwd=tmp_path,
         timeout=5,
     )
@@ -109,12 +110,12 @@ def test_cancel_marks_background_command_cancelled(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "state")
     registry = ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"print('codex')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
     )
 
     task = registry.submit_command(
-        command="python3 -c \"import time; time.sleep(2)\"",
+        command=python_sleep_cmd(2),
         cwd=tmp_path,
         timeout=5,
     )
@@ -131,8 +132,8 @@ def test_submit_persists_structured_delegate_metadata(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "state")
     registry = ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"print('codex')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
     )
 
     task = registry.submit(
@@ -158,8 +159,8 @@ def test_build_prompt_includes_structured_delegate_sections(tmp_path: Path) -> N
     store = TaskStore(tmp_path / "state")
     registry = ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"print('codex')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
     )
 
     prompt = registry._build_prompt(
@@ -296,8 +297,8 @@ def test_delegate_task_extracts_structured_json_output(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "state")
     registry = ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"print('{\\\"ok\\\": true}')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_json_cmd({"ok": True}),
+        claude_command=python_print_cmd("claude"),
     )
 
     task = registry.submit(

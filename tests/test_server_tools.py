@@ -6,6 +6,7 @@ from pathlib import Path
 
 from notion_local_ops_mcp.executors import ExecutorRegistry
 from notion_local_ops_mcp.tasks import TaskStore
+from tests.helpers import python_print_cmd
 
 
 def _call(tool, *args, **kwargs):
@@ -46,13 +47,13 @@ def test_server_run_command_can_dispatch_background_tasks(tmp_path: Path) -> Non
 
     server.registry = ExecutorRegistry(
         store=TaskStore(tmp_path / "state"),
-        codex_command="python3 -c \"print('codex')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
     )
 
     queued = _call(
         server.run_command,
-        command="python3 -c \"print('background')\"",
+        command=python_print_cmd("background"),
         cwd=str(tmp_path),
         timeout=5,
         run_in_background=True,
@@ -207,8 +208,8 @@ def test_server_delegate_task_accepts_structured_fields(tmp_path: Path) -> None:
 
     server.registry = ExecutorRegistry(
         store=TaskStore(tmp_path / "state"),
-        codex_command="python3 -c \"print('codex')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
     )
 
     queued = _call(
@@ -235,13 +236,13 @@ def test_server_run_command_stream_returns_task_polling_hint(tmp_path: Path) -> 
     try:
         server.registry = ExecutorRegistry(
             store=TaskStore(tmp_path / "state"),
-            codex_command="python3 -c \"print('codex')\"",
-            claude_command="python3 -c \"print('claude')\"",
+            codex_command=python_print_cmd("codex"),
+            claude_command=python_print_cmd("claude"),
         )
 
         queued = _call(
             server.run_command_stream,
-            command="python3 -c \"print('stream')\"",
+            command=python_print_cmd("stream"),
             cwd=str(tmp_path),
             timeout=5,
         )
@@ -264,8 +265,8 @@ def test_server_purge_tasks_dry_run_reports_candidates(tmp_path: Path) -> None:
         server.store = TaskStore(tmp_path / "state")
         server.registry = ExecutorRegistry(
             store=server.store,
-            codex_command="python3 -c \"print('codex')\"",
-            claude_command="python3 -c \"print('claude')\"",
+            codex_command=python_print_cmd("codex"),
+            claude_command=python_print_cmd("claude"),
         )
 
         created = server.store.create(task="old", executor="shell", cwd=str(tmp_path))

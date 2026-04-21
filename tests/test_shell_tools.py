@@ -1,11 +1,12 @@
 from pathlib import Path
 
 from notion_local_ops_mcp.shell import TIMEOUT_EXIT_CODE, run_command
+from tests.helpers import python_print_cmd, python_sleep_cmd
 
 
 def test_run_command_returns_stdout_and_exit_code(tmp_path: Path) -> None:
     result = run_command(
-        command="python3 -c \"print('hello')\"",
+        command=python_print_cmd("hello"),
         cwd=tmp_path,
         timeout=5,
     )
@@ -18,7 +19,7 @@ def test_run_command_returns_stdout_and_exit_code(tmp_path: Path) -> None:
 
 def test_run_command_timeout_returns_unified_shape(tmp_path: Path) -> None:
     result = run_command(
-        command="sleep 2",
+        command=python_sleep_cmd(2),
         cwd=tmp_path,
         timeout=1,
     )

@@ -227,6 +227,21 @@ http://127.0.0.1:8766/mcp
 - 如果 `NOTION_LOCAL_OPS_AUTH_TOKEN` 未设置，脚本会直接报错退出，而不是猜测
 - 全新 clone 后，通常不需要先手动执行 `pip install`
 
+### Windows 可选多实例启动器
+
+如果你希望使用面向 Windows 的多实例本地 MCP + quick tunnel 运维工作流，可以运行：
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\launch-mcp-manager.ps1
+```
+
+说明：
+
+- 这是可选的 Windows 运维层，不影响核心 MCP server 的启动方式
+- 优先把 `cloudflared` 安装到 PATH；如果需要显式指定路径，可设置 `NOTION_LOCAL_OPS_CLOUDFLARED_COMMAND`
+- 如果不想把状态快照写到桌面，可设置 `NOTION_LOCAL_OPS_STATUS_PATH`
+- 每个实例的日志和状态文件会写到 `.state/launcher/`
+
 ### 用 cloudflared 暴露服务
 
 #### Quick tunnel
@@ -263,6 +278,8 @@ cloudflared tunnel --config ./cloudflared-example.yml run <your-tunnel-name>
 | `NOTION_LOCAL_OPS_AUTH_TOKEN` | 否 | empty |
 | `NOTION_LOCAL_OPS_CLOUDFLARED_CONFIG` | 否 | empty |
 | `NOTION_LOCAL_OPS_TUNNEL_NAME` | 否 | empty |
+| `NOTION_LOCAL_OPS_CLOUDFLARED_COMMAND` | 否 | empty |
+| `NOTION_LOCAL_OPS_STATUS_PATH` | 否 | 桌面上的 `Notion-MCP-status.txt` |
 | `NOTION_LOCAL_OPS_CODEX_COMMAND` | 否 | `codex` |
 | `NOTION_LOCAL_OPS_CLAUDE_COMMAND` | 否 | `claude` |
 | `NOTION_LOCAL_OPS_COMMAND_TIMEOUT` | 否 | `120` |

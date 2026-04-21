@@ -227,6 +227,21 @@ Notes:
 - if `NOTION_LOCAL_OPS_AUTH_TOKEN` is unset, the script exits with an error instead of guessing
 - for a fresh clone, you do not need to run `pip install` manually before using this script
 
+### Windows Optional Multi-Instance Launcher
+
+If you want a Windows-focused operator workflow for multiple local MCP instances and quick tunnels, use:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\launch-mcp-manager.ps1
+```
+
+Notes:
+
+- this launcher is optional and separate from the core MCP server
+- install `cloudflared` on PATH, or set `NOTION_LOCAL_OPS_CLOUDFLARED_COMMAND` to an explicit executable path
+- set `NOTION_LOCAL_OPS_STATUS_PATH` if you want the status snapshot written somewhere other than the Desktop
+- per-instance logs and state live under `.state/launcher/`
+
 ### Expose With cloudflared
 
 #### Quick tunnel
@@ -263,6 +278,8 @@ cloudflared tunnel --config ./cloudflared-example.yml run <your-tunnel-name>
 | `NOTION_LOCAL_OPS_AUTH_TOKEN` | no | empty |
 | `NOTION_LOCAL_OPS_CLOUDFLARED_CONFIG` | no | empty |
 | `NOTION_LOCAL_OPS_TUNNEL_NAME` | no | empty |
+| `NOTION_LOCAL_OPS_CLOUDFLARED_COMMAND` | no | empty |
+| `NOTION_LOCAL_OPS_STATUS_PATH` | no | Desktop `Notion-MCP-status.txt` |
 | `NOTION_LOCAL_OPS_CODEX_COMMAND` | no | `codex` |
 | `NOTION_LOCAL_OPS_CLAUDE_COMMAND` | no | `claude` |
 | `NOTION_LOCAL_OPS_COMMAND_TIMEOUT` | no | `120` |
