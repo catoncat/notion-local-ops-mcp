@@ -282,3 +282,21 @@ def test_server_purge_tasks_dry_run_reports_candidates(tmp_path: Path) -> None:
     finally:
         server.store = old_store
         server.registry = old_registry
+
+
+def test_server_apply_patch_tool_description_uses_generic_patch_language() -> None:
+    from notion_local_ops_mcp import server
+
+    async def scenario() -> str:
+        list_tools = getattr(server.mcp, "_list_tools")
+        try:
+            tools = await list_tools()
+        except TypeError:
+            tools = await list_tools(None)
+        apply_patch_tool = next(tool for tool in tools if tool.name == "apply_patch")
+        return apply_patch_tool.description
+
+    description = asyncio.run(scenario())
+
+    assert "codex-style" not in description
+    assert "*** Begin Patch" in description

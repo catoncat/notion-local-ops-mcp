@@ -40,7 +40,7 @@ src/notion_local_ops_mcp/
 | `search` | Canonical unified query tool (glob/regex/text); hides hidden and `.gitignore`d paths by default and supports regex/text against a single file |
 | `read_text` | Canonical single/batch text reader with line pagination and optional line numbers |
 | `write_file` | Create or overwrite a file (`dry_run` supported) |
-| `apply_patch` | Default edit tool for existing files; supports validation/dry-run |
+| `apply_patch` | Default edit tool for existing files; rejects pure-context hunks, requires unique matches, and supports validation/dry-run |
 | `git_status` / `git_diff` / `git_commit` / `git_log` / `git_show` / `git_blame` | Structured git workflows (when cwd is actually inside a git repo) |
 | `run_command` | Execute a shell command (sync or background) |
 | `run_command_stream` | Start long shell command and poll via task id |

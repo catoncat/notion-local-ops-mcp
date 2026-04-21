@@ -178,3 +178,89 @@ def test_apply_patch_validate_only_checks_patch_without_writing(tmp_path: Path) 
     assert result["validated"] is True
     assert result["applied"] is False
     assert target.read_text(encoding="utf-8") == "hello\n"
+
+
+def test_apply_patch_rejects_context_only_hunk(tmp_path: Path) -> None:
+    target = tmp_path / "note.txt"
+    target.write_text("alpha\nbeta\n", encoding="utf-8")
+
+    result = apply_patch(
+        patch="\n".join(
+            [
+                "*** Begin Patch",
+                "*** Update File: note.txt",
+                "@@",
+                " alpha",
+                " beta",
+                "*** End Patch",
+            ]
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "empty_hunk"
+    assert result["patch_line"] == 3
+
+
+def test_apply_patch_requires_unique_context_match(tmp_path: Path) -> None:
+    target = tmp_path / "note.txt"
+    target.write_text("alpha\nbeta\nalpha\nbeta\n", encoding="utf-8")
+
+    result = apply_patch(
+        patch="\n".join(
+            [
+                "*** Begin Patch",
+                "*** Update File: note.txt",
+                "@@",
+                " alpha",
+                "-beta",
+                "+BETA",
+                "*** End Patch",
+            ]
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "ambiguous_context_match"
+    assert result["match_count"] == 2
+    assert result["expected_match_count"] == 1
+    assert result["matching_lines"] == [1, 3]
+
+
+def test_apply_patch_returns_change_stats_and_warnings(tmp_path: Path) -> None:
+    target = tmp_path / "note.txt"
+    target.write_text("alpha\nomega\n", encoding="utf-8")
+
+    result = apply_patch(
+        patch="\n".join(
+            [
+                "*** Begin Patch",
+                "*** Update File: note.txt",
+                "@@",
+                " alpha",
+                "+beta",
+                " omega",
+                "*** End Patch",
+            ]
+        ),
+        workspace_root=tmp_path,
+        return_diff=True,
+    )
+
+    assert result["success"] is True
+    file_summary = result["files"][0]
+    assert file_summary["path"] == str(target)
+    assert file_summary["kind"] == "update"
+    assert file_summary["lines_added"] == 1
+    assert file_summary["lines_removed"] == 0
+    assert file_summary["bytes_before"] == len("alpha\nomega\n".encode("utf-8"))
+    assert file_summary["bytes_after"] == len("alpha\nbeta\nomega\n".encode("utf-8"))
+    assert file_summary["hunks_applied"] == 1
+    assert len(file_summary["sha256_after"]) == 64
+    assert file_summary["warnings"] == [
+        "update inserted lines without removing any existing lines; verify this was intended"
+    ]
+    assert result["warnings"] == file_summary["warnings"]
+    assert target.read_text(encoding="utf-8") == "alpha\nbeta\nomega\n"

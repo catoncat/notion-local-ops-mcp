@@ -300,7 +300,11 @@ def write_file(path: str, content: str, dry_run: bool = False) -> dict[str, obje
 
 @mcp.tool(
     name="apply_patch",
-    description="Apply a codex-style patch with add, update, move, or delete operations.",
+    description=(
+        "Apply a structured patch using *** Begin Patch / *** Update File blocks. "
+        "Each @@ hunk must contain at least one '+' or '-' line and must "
+        "match exactly one location in the target file; pure-context hunks are rejected."
+    ),
 )
 def apply_patch(
     patch: str,

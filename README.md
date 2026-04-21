@@ -69,7 +69,7 @@ Tool strategy:
 - server_info: call first when troubleshooting connection/runtime mismatches.
 - set_default_cwd / get_default_cwd: set once for repeated repo operations instead of passing cwd every time.
 - In coding tasks, search the local repo first. Do not default to searching the Notion workspace.
-- apply_patch: use this as the default edit tool for existing files, including small edits, multi-hunk edits, moves, deletes, or adds in one patch. Use dry_run=true, validate_only=true, or return_diff=true when you want validation or a preview before writing.
+- apply_patch: use this as the default edit tool for existing files, including small edits, multi-hunk edits, moves, deletes, or adds in one patch. Each @@ hunk must include at least one '+' or '-' line and must match exactly one location in the file. Use dry_run=true, validate_only=true, or return_diff=true when you want validation or a preview before writing.
 - write_file: create new files or rewrite short files when that is simpler than patching; use dry_run=true for no-write preview.
 - run_command_stream: start long-running shell jobs with immediate task_id return for polling progress. Prefer it for tests, installs, builds, compile steps, and other jobs that may take a while.
 - get_task / wait_task: check delegated task or background command status; prefer wait_task when blocking is useful.
@@ -291,7 +291,7 @@ cloudflared tunnel --config ./cloudflared-example.yml run <your-tunnel-name>
 - `search`: canonical query tool that unifies glob path search, regex grep, and literal substring search; excludes hidden and `.gitignore`d paths by default and supports regex/text search against a single file path
 - `read_text`: canonical single/batch reader with line-based pagination (`start_line`/`line_limit`), optional `include_line_numbers`, and `language` hint
 - `write_file`: write full file content, supports `dry_run`
-- `apply_patch`: default edit tool for existing files; supports add/update/move/delete patches plus `dry_run`, `validate_only`, and optional diff output
+- `apply_patch`: default edit tool for existing files; uses `*** Begin Patch` / `*** Update File` syntax, rejects pure-context hunks, requires unique context matches, and returns per-file change stats/warnings
 - `server_info`: inspect runtime config and the registered MCP tool list
 - `set_default_cwd`: set session default working directory for subsequent calls
 - `get_default_cwd`: inspect current session/effective working directory
