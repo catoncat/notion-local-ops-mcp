@@ -191,6 +191,50 @@ function Wait-ForPort {
     return $false
 }
 
+function Wait-ForProcessExit {
+    param(
+        [int]$ProcessId,
+        [int]$TimeoutSeconds = 8
+    )
+
+    if ($ProcessId -le 0) {
+        return $true
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Test-ProcessAlive -ProcessId $ProcessId)) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 250
+    }
+
+    return (-not (Test-ProcessAlive -ProcessId $ProcessId))
+}
+
+function Reset-LogFile {
+    param(
+        [string]$Path,
+        [int]$TimeoutSeconds = 8
+    )
+
+    Ensure-ParentDirectory -Path $Path
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $lastError = ''
+    while ((Get-Date) -lt $deadline) {
+        try {
+            [System.IO.File]::WriteAllText($Path, '', [System.Text.Encoding]::UTF8)
+            return
+        }
+        catch {
+            $lastError = $_.Exception.Message
+            Start-Sleep -Milliseconds 250
+        }
+    }
+
+    throw "Unable to reset log file ${Path}: $lastError"
+}
+
 function Get-FreePorts {
     param(
         [int]$Count,
@@ -389,9 +433,18 @@ function Stop-ManagedProcess {
 
     if (Test-ProcessAlive -ProcessId $ProcessId) {
         try {
-            Stop-Process -Id $ProcessId -Force -ErrorAction Stop
+            & taskkill.exe /PID $ProcessId /T /F | Out-Null
         }
         catch {
+        }
+
+        if (-not (Wait-ForProcessExit -ProcessId $ProcessId -TimeoutSeconds 8)) {
+            try {
+                Stop-Process -Id $ProcessId -Force -ErrorAction Stop
+            }
+            catch {
+            }
+            [void](Wait-ForProcessExit -ProcessId $ProcessId -TimeoutSeconds 2)
         }
     }
 }
@@ -801,7 +854,7 @@ function Start-QuickTunnel {
 
     Stop-ManagedProcess -ProcessId ([int]$Instance.CloudflaredProcessId)
     foreach ($path in @($Instance.CloudflaredStdoutLogPath, $Instance.CloudflaredStderrLogPath)) {
-        Set-Content -LiteralPath $path -Value '' -Encoding UTF8
+        Reset-LogFile -Path $path
     }
 
     $originUrl = "http://$($Instance.Host):$($Instance.Port)"
@@ -888,48 +941,31 @@ function Invoke-PublicMcpProbe {
         $headers['Authorization'] = "Bearer $($Instance.Token)"
     }
 
-    $handler = [System.Net.Http.HttpClientHandler]::new()
-    $client = [System.Net.Http.HttpClient]::new($handler)
-    $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $Instance.PublicMcpUrl)
-
     try {
-        $client.Timeout = [TimeSpan]::FromSeconds($TimeoutSeconds)
-        [void]$request.Headers.Accept.ParseAdd('*/*')
-        if ($headers.ContainsKey('Authorization')) {
-            $request.Headers.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::Parse($headers['Authorization'])
-        }
-
-        $response = $client.SendAsync($request, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
-        try {
-            $statusCode = [int]$response.StatusCode
-            return [pscustomobject]@{
-                Success = ($statusCode -eq 200)
-                StatusCode = $statusCode
-                Message = "HTTP $statusCode"
-            }
-        }
-        finally {
-            if ($null -ne $response) {
-                $response.Dispose()
-            }
+        $response = Invoke-WebRequest -Uri $Instance.PublicMcpUrl -Method Head -Headers $headers -UseBasicParsing -TimeoutSec $TimeoutSeconds
+        $statusCode = [int]$response.StatusCode
+        return [pscustomobject]@{
+            Success = ($statusCode -eq 200 -or $statusCode -eq 204)
+            StatusCode = $statusCode
+            Message = "HTTP $statusCode"
         }
     }
     catch {
+        $statusCode = 0
+        $message = $_.Exception.Message
+        $response = $_.Exception.Response
+        if ($null -ne $response) {
+            try {
+                $statusCode = [int]$response.StatusCode.value__
+                $message = "HTTP $statusCode"
+            }
+            catch {
+            }
+        }
         return [pscustomobject]@{
             Success = $false
-            StatusCode = 0
-            Message = $_.Exception.Message
-        }
-    }
-    finally {
-        if ($null -ne $request) {
-            $request.Dispose()
-        }
-        if ($null -ne $client) {
-            $client.Dispose()
-        }
-        if ($null -ne $handler) {
-            $handler.Dispose()
+            StatusCode = $statusCode
+            Message = $message
         }
     }
 }
