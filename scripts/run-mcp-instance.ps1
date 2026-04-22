@@ -39,6 +39,8 @@ $banner = @(
 )
 $banner | Out-File -LiteralPath $LogPath -Encoding UTF8 -Append
 
+$exitCode = 1
+
 try {
     if ($ServerExecutable.ToLowerInvariant().EndsWith('python.exe')) {
         $workingDir = Split-Path -Parent (Split-Path -Parent $ServerExecutable)
@@ -46,6 +48,7 @@ try {
     else {
         $workingDir = Split-Path -Parent $ServerExecutable
     }
+
     Push-Location $workingDir
     try {
         if ($ServerExecutable.ToLowerInvariant().EndsWith('python.exe')) {
@@ -54,8 +57,9 @@ try {
         else {
             $commandLine = '"{0}" >> "{1}" 2>&1' -f $ServerExecutable, $LogPath
         }
+
         cmd.exe /d /c $commandLine
-        exit $LASTEXITCODE
+        $exitCode = $LASTEXITCODE
     }
     finally {
         Pop-Location
@@ -63,5 +67,14 @@ try {
 }
 catch {
     $_ | Out-File -LiteralPath $LogPath -Encoding UTF8 -Append
-    exit 1
+    $exitCode = 1
 }
+finally {
+    @(
+        ('-' * 72),
+        ("[{0}] MCP instance exited with code {1}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), $exitCode),
+        ('-' * 72)
+    ) | Out-File -LiteralPath $LogPath -Encoding UTF8 -Append
+}
+
+exit $exitCode
