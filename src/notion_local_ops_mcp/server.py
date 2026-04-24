@@ -14,6 +14,7 @@ from .config import (
     COMMAND_TIMEOUT,
     DEBUG_MCP_LOGGING,
     DELEGATE_TIMEOUT,
+    HTTP_KEEPALIVE_TIMEOUT,
     HOST,
     PORT,
     STATE_DIR,
@@ -331,6 +332,7 @@ async def server_info() -> dict[str, object]:
         "state_dir": str(STATE_DIR),
         "command_timeout_seconds": COMMAND_TIMEOUT,
         "delegate_timeout_seconds": DELEGATE_TIMEOUT,
+        "http_keepalive_timeout_seconds": HTTP_KEEPALIVE_TIMEOUT,
         "auth": "bearer" if AUTH_TOKEN else "none",
         "debug_mcp_logging": bool(DEBUG_MCP_LOGGING),
         "codex_command": CODEX_COMMAND,
@@ -680,8 +682,14 @@ def main() -> None:
     print("transport=streamable-http")
     print("mcp_path=/mcp")
     print(f"debug_mcp_logging={DEBUG_MCP_LOGGING}")
+    print(f"timeout_keep_alive={HTTP_KEEPALIVE_TIMEOUT}")
     app = build_http_app()
-    uvicorn.run(app, host=HOST, port=PORT)
+    uvicorn.run(
+        app,
+        host=HOST,
+        port=PORT,
+        timeout_keep_alive=HTTP_KEEPALIVE_TIMEOUT
+    )
 
 
 if __name__ == "__main__":

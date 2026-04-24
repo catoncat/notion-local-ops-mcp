@@ -55,6 +55,9 @@ COMMAND_TIMEOUT = int(os.environ.get("NOTION_LOCAL_OPS_COMMAND_TIMEOUT", "120"))
 DELEGATE_TIMEOUT = int(os.environ.get("NOTION_LOCAL_OPS_DELEGATE_TIMEOUT", "1800"))
 DEBUG_MCP_LOGGING = _env_flag("NOTION_LOCAL_OPS_DEBUG_MCP_LOGGING", default=False)
 
+# HTTP keep-alive timeout for uvicorn (default 3600 seconds / 1 hour)
+HTTP_KEEPALIVE_TIMEOUT = int(os.environ.get("NOTION_LOCAL_OPS_HTTP_KEEPALIVE_TIMEOUT", "3600"))
+
 
 def ensure_runtime_directories() -> None:
     if not WORKSPACE_ROOT.exists():
