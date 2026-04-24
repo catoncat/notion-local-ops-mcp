@@ -1158,7 +1158,7 @@ function Write-StatusSnapshot {
         $lines.Add(("  Server PID: {0}" -f $row.ServerPID))
         $lines.Add(("  cloudflared PID: {0}" -f $row.TunnelPID))
         if ($row.NeedsNotionUrlUpdate) {
-            $lines.Add('  NOTE: Public MCP URL changed. Update the Notion connector URL manually.')
+            $lines.Add('  NOTE: Public MCP URL changed. Keep the same Notion Agent connection name; update only the connector URL manually.')
         }
         if (-not [string]::IsNullOrWhiteSpace($row.LastFailureReason)) {
             $lines.Add(("  Last Failure: {0}" -f $row.LastFailureReason))
@@ -1269,7 +1269,7 @@ function Render-StatusPanel {
         Write-Host ("    Public MCP URL: {0}" -f $row.PublicMcpUrl)
         Write-Host ("    Restart Count: {0}" -f $row.RestartCount)
         if ($row.NeedsNotionUrlUpdate) {
-            Write-Host '    NOTE: Public MCP URL changed. Update Notion manually.' -ForegroundColor Yellow
+            Write-Host '    NOTE: Public MCP URL changed. Keep the same Notion Agent connection name; update only the connector URL manually.' -ForegroundColor Yellow
         }
         if (-not [string]::IsNullOrWhiteSpace($row.LastFailureReason)) {
             Write-Host ("    Last Failure: {0}" -f $row.LastFailureReason) -ForegroundColor Yellow

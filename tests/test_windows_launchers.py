@@ -354,7 +354,7 @@ def test_run_mcp_instance_script_executes_server_and_writes_log(tmp_path: Path) 
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific launcher smoke tests")
-def test_launch_manager_rebuilds_quick_tunnel_and_updates_url(tmp_path: Path) -> None:
+def test_launch_manager_rebuilds_quick_tunnel_and_preserves_connection_name(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     fake_cloudflared, fake_cloudflared_state_path, fake_cloudflared_port_base = _write_fake_cloudflared(
         tmp_path,
@@ -376,6 +376,7 @@ def test_launch_manager_rebuilds_quick_tunnel_and_updates_url(tmp_path: Path) ->
         initial_instance = _wait_for_launcher_instance(launcher_state_path)
         initial_server_pid = int(initial_instance["server_pid"])
         initial_public_mcp_url = str(initial_instance["public_mcp_url"])
+        initial_name = str(initial_instance["name"])
 
         final_instance = _wait_for_launcher_state(
             launcher_state_path,
@@ -391,6 +392,10 @@ def test_launch_manager_rebuilds_quick_tunnel_and_updates_url(tmp_path: Path) ->
         assert int(final_instance["restart_count"]) >= 1
         assert final_instance["tunnel_mode"] == "quick"
         assert bool(final_instance["needs_notion_url_update"]) is True
+        # Connection name must stay the same across quick tunnel rebuilds
+        assert str(final_instance["name"]) == initial_name
+        # mcp_url must equal public_mcp_url (the URL Notion connects to)
+        assert str(final_instance["mcp_url"]) == str(final_instance["public_mcp_url"])
 
         status_text = _wait_for(
             lambda: (
@@ -404,6 +409,9 @@ def test_launch_manager_rebuilds_quick_tunnel_and_updates_url(tmp_path: Path) ->
         )
         assert "Public MCP URL changed" in status_text
         assert str(final_instance["public_mcp_url"]) in status_text
+        # Status text must explicitly tell the user to keep the same connection name
+        assert "Keep the same Notion Agent connection name" in status_text
+        assert "update only the connector URL" in status_text
     finally:
         _kill_process_tree(process.pid)
         _cleanup_launcher_state(launcher_state_path)
