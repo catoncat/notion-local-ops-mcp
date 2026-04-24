@@ -256,3 +256,53 @@ def test_apply_patch_allows_multiple_hunks_in_single_update_file(tmp_path: Path)
 
     assert result["success"] is True
     assert target.read_text(encoding="utf-8") == "one\nTWO\nthree\nFOUR\n"
+
+
+def test_apply_patch_rejects_duplicate_with_canonical_path_equivalence(tmp_path: Path) -> None:
+    """'app.py' and './app.py' resolve to the same canonical path — reject."""
+    target = tmp_path / "app.py"
+    target.write_text("hello\n", encoding="utf-8")
+
+    result = apply_patch(
+        patch="\n".join(
+            [
+                "*** Begin Patch",
+                "*** Update File: app.py",
+                "@@",
+                "-hello",
+                "+HELLO",
+                "*** Delete File: ./app.py",
+                "*** End Patch",
+            ]
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "duplicate_patch_target"
+
+
+def test_apply_patch_rejects_move_to_collision(tmp_path: Path) -> None:
+    """Update a.py → Move to: b.py collides with Add File: b.py — reject."""
+    source = tmp_path / "a.py"
+    source.write_text("hello\n", encoding="utf-8")
+
+    result = apply_patch(
+        patch="\n".join(
+            [
+                "*** Begin Patch",
+                "*** Update File: a.py",
+                "*** Move to: b.py",
+                "@@",
+                "-hello",
+                "+world",
+                "*** Add File: b.py",
+                "+extra",
+                "*** End Patch",
+            ]
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "duplicate_patch_target"

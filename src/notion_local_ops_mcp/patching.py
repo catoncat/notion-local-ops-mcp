@@ -342,13 +342,15 @@ def apply_patch(
 ) -> dict[str, object]:
     try:
         operations = parse_patch(patch)
-        # Detect duplicate targets — same path referenced by more than one
-        # operation in a single patch.  Multiple hunks in a single Update
-        # are fine, but two separate operations targeting the same file can
-        # lead to incorrect results (e.g. Add then Update overwrites the Add).
-        seen_paths: list[str] = []
+        # Detect duplicate targets — same canonical path referenced by more
+        # than one operation in a single patch.  We resolve each path via
+        # resolve_path (which is what _plan_add/_plan_delete/_plan_update use)
+        # so that "foo" and "./foo" are treated as the same target.  Move-to
+        # targets are also checked to prevent collisions.
+        seen_paths: set[str] = set()
         for op in operations:
-            if op.path in seen_paths:
+            canonical = str(resolve_path(op.path, workspace_root))
+            if canonical in seen_paths:
                 return _error(
                     "duplicate_patch_target",
                     (
@@ -358,7 +360,21 @@ def apply_patch(
                     ),
                     path=op.path,
                 )
-            seen_paths.append(op.path)
+            seen_paths.add(canonical)
+            # Also check move-to destination to prevent two ops writing to
+            # the same final path (e.g. Update A → Move to: B + Add File: B).
+            if isinstance(op, UpdateFilePatch) and op.move_to:
+                move_canonical = str(resolve_path(op.move_to, workspace_root))
+                if move_canonical in seen_paths:
+                    return _error(
+                        "duplicate_patch_target",
+                        (
+                            f"Move target '{op.move_to}' collides with another "
+                            "patch operation. Each path may only appear once."
+                        ),
+                        path=op.move_to,
+                    )
+                seen_paths.add(move_canonical)
         planned_changes: list[PlannedChange] = []
         for operation in operations:
             if isinstance(operation, AddFilePatch):

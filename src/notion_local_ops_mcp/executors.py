@@ -356,6 +356,16 @@ class ExecutorRegistry:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
+        # Re-check: the worker thread may have marked the task as succeeded/failed
+        # while we were killing the process. Don't overwrite a terminal status.
+        latest = self.store.get(task_id)
+        latest_status = latest.get("status", "")
+        if latest_status in TERMINAL_TASK_STATUSES:
+            return {
+                "task_id": task_id,
+                "status": latest_status,
+                "cancelled": latest_status == "cancelled",
+            }
         self.store.update(task_id, status="cancelled")
         self._mark_completed(task_id)
         return {

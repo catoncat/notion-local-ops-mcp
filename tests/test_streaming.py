@@ -522,3 +522,41 @@ def test_streaming_preserves_emoji_split_across_chunks(tmp_path: Path, monkeypat
 
     assert "🙂" in stdout
     assert "\ufffd" not in stdout, f"Replacement character found in: {stdout!r}"
+
+
+# ---------------------------------------------------------------------------
+# 14. cancel re-checks status after kill_process (race condition fix)
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_does_not_overwrite_succeeded_race(tmp_path: Path, monkeypatch) -> None:
+    """Simulate a race: the worker thread marks the task succeeded just before
+    cancel() writes 'cancelled'.  cancel() should re-read the status after
+    killing the process and preserve 'succeeded'."""
+    store = TaskStore(tmp_path / "state")
+    registry = ExecutorRegistry(
+        store=store,
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
+    )
+
+    # Submit a fast task
+    task = registry.submit_command(
+        command=python_print_cmd("done"),
+        cwd=tmp_path,
+        timeout=5,
+    )
+    task_id = task["task_id"]
+
+    # Wait for it to succeed
+    result = registry.wait(task_id, timeout=5)
+    assert result["status"] == "succeeded"
+
+    # Now cancel — should not overwrite
+    cancel_result = registry.cancel(task_id)
+    assert cancel_result["status"] == "succeeded"
+    assert cancel_result["cancelled"] is False
+
+    # Double-check store
+    final = store.get(task_id)
+    assert final["status"] == "succeeded"
