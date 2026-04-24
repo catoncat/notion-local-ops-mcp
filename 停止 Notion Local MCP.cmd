@@ -17,7 +17,7 @@ if not exist "%SCRIPT%" (
 
 )
 
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%"
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "& { [Console]::InputEncoding = [System.Text.Encoding]::UTF8; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; . '%SCRIPT%' }"
 
 set "EXITCODE=%ERRORLEVEL%"
 

@@ -1,4 +1,4 @@
-﻿param(
+param(
     [int]$DefaultCount = 1,
     [int]$DefaultBasePort = 8766,
     [int]$RequestedCount = 0,
@@ -950,7 +950,7 @@ function Invoke-PublicMcpProbe {
 
     # Try HEAD first; if it fails with a connection/TLS error, fall back to GET.
     # Cloudflare quick tunnels sometimes drop HEAD requests due to TLS handshake
-    # issues ("基础连接已经关闭"), while GET works reliably.
+    # issues ("The underlying connection was closed"), while GET works reliably.
     foreach ($method in @('Head', 'Get')) {
         try {
             $response = Invoke-WebRequest -Uri $Instance.PublicMcpUrl -Method $method -Headers $headers -UseBasicParsing -TimeoutSec $TimeoutSeconds
@@ -1091,11 +1091,19 @@ function Probe-LocalInstance {
 function Get-RestartBackoffSeconds {
     param([int]$FailureCount)
 
-    switch ([Math]::Min([Math]::Max($FailureCount, 0), 2)) {
-        0 { return 2 }
-        1 { return 5 }
-        default { return 10 }
+    # Exponential backoff: 2, 5, 10, 20, 40, 60, 90 ... capped at 120
+    $seconds = switch ([Math]::Min([Math]::Max($FailureCount, 0), 6)) {
+        0 { 2 }
+        1 { 5 }
+        2 { 10 }
+        3 { 20 }
+        4 { 40 }
+        5 { 60 }
+        default { 90 }
     }
+
+    # If cloudflared stderr shows 429 rate-limit, add extra delay
+    return $seconds
 }
 
 function Repair-Instance {
@@ -1108,6 +1116,21 @@ function Repair-Instance {
     )
 
     $backoffSeconds = Get-RestartBackoffSeconds -FailureCount ([int]$Instance.ConsecutiveRepairFailures)
+
+    # If last tunnel failure was a 429 rate-limit, add 30s extra backoff
+    # to avoid hammering cloudflare and getting permanently blocked
+    $cloudflaredStderrPath = [string]$Instance.CloudflaredStderrLogPath
+    if (-not [string]::IsNullOrWhiteSpace($cloudflaredStderrPath) -and (Test-Path -LiteralPath $cloudflaredStderrPath)) {
+        try {
+            $stderrContent = Get-Content -LiteralPath $cloudflaredStderrPath -Raw -Encoding UTF8 -ErrorAction Stop
+            if ($stderrContent -match '429 Too Many Requests' -or $stderrContent -match 'error code: 1015') {
+                $backoffSeconds = $backoffSeconds + 30
+            }
+        }
+        catch {
+        }
+    }
+
     if ($backoffSeconds -gt 0) {
         Start-Sleep -Seconds $backoffSeconds
     }
