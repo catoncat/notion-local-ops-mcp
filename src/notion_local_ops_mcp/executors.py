@@ -37,15 +37,20 @@ def _kill_process(process: subprocess.Popen) -> None:
         # shell=True on Windows means cmd.exe is the direct child;
         # taskkill /T /F kills the entire process tree.
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["taskkill", "/T", "/F", "/PID", str(process.pid)],
                 capture_output=True,
+                text=True,
                 timeout=10,
             )
-            return
+            if result.returncode == 0 or process.poll() is not None:
+                return
         except Exception:
             pass  # fall through to regular kill
-    process.kill()
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
 
 
 def _binary_name(binary: str) -> str:
@@ -319,18 +324,43 @@ class ExecutorRegistry:
             time.sleep(interval)
 
     def cancel(self, task_id: str) -> dict[str, object]:
+        try:
+            meta = self.store.get(task_id)
+        except (FileNotFoundError, ValueError):
+            return {
+                "success": False,
+                "task_id": task_id,
+                "error": {
+                    "code": "task_not_found",
+                    "message": f"Task not found: {task_id}",
+                },
+                "cancelled": False,
+            }
+
+        current_status = meta.get("status", "")
+        if current_status in TERMINAL_TASK_STATUSES:
+            return {
+                "task_id": task_id,
+                "status": current_status,
+                "cancelled": current_status == "cancelled",
+            }
+
         with self._lock:
             cancel_event = self._cancel_events.get(task_id)
             process = self._processes.get(task_id)
         if cancel_event is not None:
             cancel_event.set()
         if process is not None and process.poll() is None:
-            process.kill()
-        updated = self.store.update(task_id, status="cancelled")
+            _kill_process(process)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        self.store.update(task_id, status="cancelled")
         self._mark_completed(task_id)
         return {
             "task_id": task_id,
-            "status": updated["status"],
+            "status": "cancelled",
             "cancelled": True,
         }
 
@@ -398,6 +428,8 @@ class ExecutorRegistry:
         Returns (stdout, stderr) as decoded strings.
         Raises _StreamTimeout if the deadline is exceeded.
         """
+        import codecs
+
         stdout_buf = bytearray()
         stderr_buf = bytearray()
         # Track how many bytes have already been flushed to disk so we only
@@ -405,6 +437,13 @@ class ExecutorRegistry:
         flushed_out = 0
         flushed_err = 0
         buf_lock = threading.Lock()
+
+        # Incremental decoders preserve multi-byte UTF-8 characters that span
+        # two flush boundaries (e.g. Chinese/emoji split across chunks).
+        out_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        err_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        stdout_parts: list[str] = []
+        stderr_parts: list[str] = []
 
         def _reader(stream: object, buf: bytearray) -> None:
             # Use read1() when available (BufferedReader) so we get data as
@@ -431,20 +470,26 @@ class ExecutorRegistry:
         poll_tick = min(0.05, interval)
         last_flush = time.monotonic()
 
-        def _flush_incremental() -> None:
+        def _flush_incremental(*, final: bool = False) -> None:
             nonlocal flushed_out, flushed_err
             with buf_lock:
-                new_out = _decode_output(bytes(stdout_buf[flushed_out:]))
-                new_err = _decode_output(bytes(stderr_buf[flushed_err:]))
+                out_bytes = bytes(stdout_buf[flushed_out:])
+                err_bytes = bytes(stderr_buf[flushed_err:])
                 flushed_out = len(stdout_buf)
                 flushed_err = len(stderr_buf)
+
+            new_out = out_decoder.decode(out_bytes, final=final)
+            new_err = err_decoder.decode(err_bytes, final=final)
+
+            if new_out:
+                stdout_parts.append(new_out)
+            if new_err:
+                stderr_parts.append(new_err)
+
             if new_out or new_err:
                 self.store.append_logs(task_id, stdout=new_out, stderr=new_err)
-            # Summary is cheap — always recompute from full buffers
-            with buf_lock:
-                so_full = _decode_output(bytes(stdout_buf))
-                se_full = _decode_output(bytes(stderr_buf))
-            self.store.write_summary(task_id, _summarize(so_full, se_full))
+
+            self.store.write_summary(task_id, _summarize("".join(stdout_parts), "".join(stderr_parts)))
 
         while process.poll() is None:
             if cancel_event.is_set():
@@ -470,8 +515,8 @@ class ExecutorRegistry:
         t_out.join(timeout=5)
         t_err.join(timeout=5)
 
-        # Final flush — append any remaining bytes
-        _flush_incremental()
+        # Final flush — append any remaining bytes, finalize decoders
+        _flush_incremental(final=True)
 
         with self._lock:
             self._processes.pop(task_id, None)
@@ -480,8 +525,8 @@ class ExecutorRegistry:
             self.store.update(task_id, status="failed", timed_out=True)
             raise _StreamTimeout()
 
-        stdout = _decode_output(bytes(stdout_buf))
-        stderr = _decode_output(bytes(stderr_buf))
+        stdout = "".join(stdout_parts)
+        stderr = "".join(stderr_parts)
         return stdout, stderr
 
     def _run_task_impl(
@@ -517,19 +562,25 @@ class ExecutorRegistry:
             verification_commands=verification_commands,
             commit_mode=commit_mode,
         )
-        process = subprocess.Popen(
-            invocation.args,
-            cwd=str(cwd),
-            shell=invocation.use_shell,
-            text=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        try:
+            process = subprocess.Popen(
+                invocation.args,
+                cwd=str(cwd),
+                shell=invocation.use_shell,
+                text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except OSError as exc:
+            self.store.write_logs(task_id, stdout="", stderr=str(exc))
+            self.store.write_summary(task_id, str(exc))
+            self.store.update(task_id, status="failed", exit_code=-1)
+            return
         with self._lock:
             self._processes[task_id] = process
 
         if cancel_event.is_set() and process.poll() is None:
-            process.kill()
+            _kill_process(process)
 
         try:
             stdout, stderr = self._stream_process(task_id, process, timeout, cancel_event)
@@ -597,7 +648,7 @@ class ExecutorRegistry:
             self._processes[task_id] = process
 
         if cancel_event.is_set() and process.poll() is None:
-            process.kill()
+            _kill_process(process)
 
         try:
             stdout, stderr = self._stream_process(task_id, process, timeout, cancel_event)

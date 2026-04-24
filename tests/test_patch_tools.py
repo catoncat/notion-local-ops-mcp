@@ -178,3 +178,81 @@ def test_apply_patch_validate_only_checks_patch_without_writing(tmp_path: Path) 
     assert result["validated"] is True
     assert result["applied"] is False
     assert target.read_text(encoding="utf-8") == "hello\n"
+
+
+def test_apply_patch_rejects_duplicate_update_same_file(tmp_path: Path) -> None:
+    """Same file in two separate Update operations should be rejected."""
+    target = tmp_path / "app.py"
+    target.write_text("hello\n", encoding="utf-8")
+
+    result = apply_patch(
+        patch="\n".join(
+            [
+                "*** Begin Patch",
+                "*** Update File: app.py",
+                "@@",
+                "-hello",
+                "+HELLO",
+                "*** Update File: app.py",
+                "@@",
+                "-HELLO",
+                "+hello",
+                "*** End Patch",
+            ]
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "duplicate_patch_target"
+
+
+def test_apply_patch_rejects_add_then_update_same_file(tmp_path: Path) -> None:
+    """Add then Update for the same file should be rejected."""
+    result = apply_patch(
+        patch="\n".join(
+            [
+                "*** Begin Patch",
+                "*** Add File: new.txt",
+                "+content",
+                "*** Update File: new.txt",
+                "@@",
+                "-content",
+                "+CONTENT",
+                "*** End Patch",
+            ]
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "duplicate_patch_target"
+
+
+def test_apply_patch_allows_multiple_hunks_in_single_update_file(tmp_path: Path) -> None:
+    """Multiple hunks within a single Update File operation should work fine."""
+    target = tmp_path / "app.py"
+    target.write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+
+    result = apply_patch(
+        patch="\n".join(
+            [
+                "*** Begin Patch",
+                "*** Update File: app.py",
+                "@@",
+                " one",
+                "-two",
+                "+TWO",
+                " three",
+                "@@",
+                " three",
+                "-four",
+                "+FOUR",
+                "*** End Patch",
+            ]
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert result["success"] is True
+    assert target.read_text(encoding="utf-8") == "one\nTWO\nthree\nFOUR\n"

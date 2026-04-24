@@ -1,11 +1,12 @@
 """Tests for streaming output, timeout, cancel, interval validation, and incremental flushing."""
 from __future__ import annotations
 
+import codecs
 import subprocess
 import threading
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -240,3 +241,284 @@ def test_kill_process_noop_when_already_exited(tmp_path: Path) -> None:
     proc.wait(timeout=5)
     # Should be a no-op, not raise
     _kill_process(proc)
+
+
+# ---------------------------------------------------------------------------
+# 9. cancel_task does not overwrite succeeded/failed tasks
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_does_not_overwrite_succeeded_task(tmp_path: Path) -> None:
+    """After a task has succeeded, calling cancel should not change its status."""
+    store = TaskStore(tmp_path / "state")
+    registry = ExecutorRegistry(
+        store=store,
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
+    )
+    task = registry.submit_command(
+        command=python_print_cmd("done"),
+        cwd=tmp_path,
+        timeout=5,
+    )
+    task_id = task["task_id"]
+    result = registry.wait(task_id, timeout=5)
+    assert result["status"] == "succeeded"
+
+    # Now try to cancel — should return succeeded, not overwritten
+    cancel_result = registry.cancel(task_id)
+    assert cancel_result["status"] == "succeeded"
+    assert cancel_result["cancelled"] is False
+
+    final = registry.get(task_id)
+    assert final["status"] == "succeeded"
+
+
+def test_cancel_does_not_overwrite_failed_task(tmp_path: Path) -> None:
+    """After a task has failed, calling cancel should not change its status."""
+    store = TaskStore(tmp_path / "state")
+    registry = ExecutorRegistry(
+        store=store,
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
+    )
+    task = registry.submit_command(
+        command=python_cmd("import sys; sys.exit(1)"),
+        cwd=tmp_path,
+        timeout=5,
+    )
+    task_id = task["task_id"]
+    result = registry.wait(task_id, timeout=5)
+    assert result["status"] == "failed"
+
+    cancel_result = registry.cancel(task_id)
+    assert cancel_result["status"] == "failed"
+    assert cancel_result["cancelled"] is False
+
+
+# ---------------------------------------------------------------------------
+# 10. cancel_task returns task_not_found for unknown task
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_unknown_task_returns_task_not_found(tmp_path: Path) -> None:
+    store = TaskStore(tmp_path / "state")
+    registry = ExecutorRegistry(
+        store=store,
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
+    )
+    result = registry.cancel("missing_task_id")
+    assert result["success"] is False
+    assert result["error"]["code"] == "task_not_found"
+    assert result["cancelled"] is False
+
+
+# ---------------------------------------------------------------------------
+# 11. cancel_task uses _kill_process helper, not direct process.kill()
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_uses_kill_process_helper(tmp_path: Path, monkeypatch) -> None:
+    """cancel() should call _kill_process helper rather than process.kill() directly."""
+    store = TaskStore(tmp_path / "state")
+    registry = ExecutorRegistry(
+        store=store,
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
+    )
+    task = registry.submit_command(
+        command=python_sleep_cmd(30),
+        cwd=tmp_path,
+        timeout=60,
+    )
+    task_id = task["task_id"]
+    time.sleep(0.3)
+
+    kill_process_calls = []
+    direct_kill_calls = []
+
+    # Track calls to _kill_process
+    original_kill_process = executors._kill_process
+    def tracked_kill_process(process):
+        kill_process_calls.append(process)
+        original_kill_process(process)
+    monkeypatch.setattr(executors, "_kill_process", tracked_kill_process)
+
+    # Track calls to direct process.kill() — should be zero if _kill_process is used
+    with registry._lock:
+        proc = registry._processes.get(task_id)
+    assert proc is not None and proc.poll() is None
+
+    # Patch the process's kill method to track direct calls
+    original_process_kill = proc.kill
+    def tracked_process_kill():
+        direct_kill_calls.append(True)
+        original_process_kill()
+    proc.kill = tracked_process_kill
+
+    registry.cancel(task_id)
+
+    # _kill_process was called at least once
+    assert len(kill_process_calls) >= 1
+    # The task's process was passed
+    assert proc in kill_process_calls
+    # process.kill() was not called directly (it's called inside _kill_process
+    # on non-Windows, so we can't assert zero — but the key point is _kill_process
+    # was the entry point, not a bare process.kill() in cancel())
+
+    result = registry.wait(task_id, timeout=5)
+    assert result["status"] == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# 12. _kill_process Windows taskkill failure falls back to process.kill()
+# ---------------------------------------------------------------------------
+
+
+def test_kill_process_windows_taskkill_failure_falls_back(monkeypatch) -> None:
+    monkeypatch.setattr(executors, "IS_WINDOWS", True)
+
+    fake_run_result = MagicMock()
+    fake_run_result.returncode = 1
+
+    monkeypatch.setattr(
+        executors.subprocess,
+        "run",
+        lambda *args, **kwargs: fake_run_result,
+    )
+
+    fake_process = MagicMock()
+    fake_process.poll.return_value = None
+    kill_calls = []
+    fake_process.kill.side_effect = lambda: kill_calls.append(True)
+
+    _kill_process(fake_process)
+
+    assert len(kill_calls) == 1, "process.kill() should be called as fallback"
+
+
+# ---------------------------------------------------------------------------
+# 13. Streaming preserves split UTF-8 multi-byte characters
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_preserves_split_utf8_character(tmp_path: Path, monkeypatch) -> None:
+    """When a multi-byte UTF-8 character is split across two read chunks,
+    the incremental decoder should reconstruct it correctly, not produce
+    replacement characters."""
+    store = TaskStore(tmp_path / "state")
+    registry = ExecutorRegistry(
+        store=store,
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
+    )
+
+    # "中" is UTF-8 bytes \xe4\xb8\xad — split it into two chunks
+    class FakeStream:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self._chunks = chunks
+            self._index = 0
+
+        def read1(self, n: int = -1) -> bytes:
+            if self._index >= len(self._chunks):
+                return b""
+            chunk = self._chunks[self._index]
+            self._index += 1
+            return chunk
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode = 0
+            self.pid = 99999
+            self.stdout = FakeStream([b"\xe4\xb8", b"\xad\n", b""])
+            self.stderr = FakeStream([b""])
+            self._polled = False
+
+        def poll(self):
+            if not self._polled:
+                self._polled = True
+                return None
+            return 0
+
+        def wait(self, timeout=None) -> int:
+            return 0
+
+    task = store.create(task="split utf8", executor="shell", cwd=str(tmp_path), timeout=10)
+    cancel_event = threading.Event()
+
+    monkeypatch.setattr(executors, "STREAM_OUTPUT_INTERVAL", 0.05)
+
+    with registry._lock:
+        registry._cancel_events[task["task_id"]] = cancel_event
+        registry._completion_events[task["task_id"]] = threading.Event()
+
+    stdout, stderr = registry._stream_process(
+        task_id=task["task_id"],
+        process=FakeProcess(),
+        timeout=10,
+        cancel_event=cancel_event,
+    )
+
+    assert stdout == "中\n"
+    assert "\ufffd" not in stdout, f"Replacement character found in: {stdout!r}"
+    assert "\ufffd" not in stderr, f"Replacement character found in: {stderr!r}"
+
+
+def test_streaming_preserves_emoji_split_across_chunks(tmp_path: Path, monkeypatch) -> None:
+    """Emoji characters (multi-byte UTF-8) should survive split across chunks."""
+    store = TaskStore(tmp_path / "state")
+    registry = ExecutorRegistry(
+        store=store,
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
+    )
+
+    # 🙂 is UTF-8 bytes \xf0\x9f\x99\x82
+    class FakeStream:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self._chunks = chunks
+            self._index = 0
+
+        def read1(self, n: int = -1) -> bytes:
+            if self._index >= len(self._chunks):
+                return b""
+            chunk = self._chunks[self._index]
+            self._index += 1
+            return chunk
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode = 0
+            self.pid = 99999
+            self.stdout = FakeStream([b"\xf0\x9f\x99", b"\x82\n", b""])
+            self.stderr = FakeStream([b""])
+            self._polled = False
+
+        def poll(self):
+            if not self._polled:
+                self._polled = True
+                return None
+            return 0
+
+        def wait(self, timeout=None) -> int:
+            return 0
+
+    task = store.create(task="emoji split", executor="shell", cwd=str(tmp_path), timeout=10)
+    cancel_event = threading.Event()
+
+    monkeypatch.setattr(executors, "STREAM_OUTPUT_INTERVAL", 0.05)
+
+    with registry._lock:
+        registry._cancel_events[task["task_id"]] = cancel_event
+        registry._completion_events[task["task_id"]] = threading.Event()
+
+    stdout, stderr = registry._stream_process(
+        task_id=task["task_id"],
+        process=FakeProcess(),
+        timeout=10,
+        cancel_event=cancel_event,
+    )
+
+    assert "🙂" in stdout
+    assert "\ufffd" not in stdout, f"Replacement character found in: {stdout!r}"

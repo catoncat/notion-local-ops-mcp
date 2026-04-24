@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from notion_local_ops_mcp.shell import TIMEOUT_EXIT_CODE, run_command
+import subprocess
+
+from notion_local_ops_mcp.shell import TIMEOUT_EXIT_CODE, _decode_output, run_command
 from tests.helpers import python_print_cmd, python_sleep_cmd
 
 
@@ -46,3 +48,36 @@ def test_run_command_cwd_errors_include_exit_code_field(tmp_path: Path) -> None:
     assert result["stdout"] == ""
     assert result["stderr"] == ""
     assert result["error"]["code"] == "cwd_not_found"
+
+
+def test_decode_output_handles_bytes() -> None:
+    """_decode_output should decode bytes to string."""
+    assert _decode_output("中文".encode("utf-8")) == "中文"
+    assert _decode_output(b"err") == "err"
+
+
+def test_decode_output_handles_string() -> None:
+    assert _decode_output("hello") == "hello"
+
+
+def test_decode_output_handles_none() -> None:
+    assert _decode_output(None) == ""
+
+
+def test_run_command_timeout_decodes_bytes(monkeypatch, tmp_path: Path) -> None:
+    """When TimeoutExpired contains bytes stdout/stderr, run_command should
+    decode them to strings, not leak raw bytes into the JSON response."""
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd="x",
+            timeout=1,
+            output="中文".encode("utf-8"),
+            stderr=b"err",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = run_command(command="x", cwd=tmp_path, timeout=1)
+    assert isinstance(result["stdout"], str)
+    assert result["stdout"] == "中文"
+    assert isinstance(result["stderr"], str)
+    assert result["stderr"] == "err"

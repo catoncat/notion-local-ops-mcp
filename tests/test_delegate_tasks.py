@@ -1,3 +1,4 @@
+import threading
 import time
 from pathlib import Path
 
@@ -309,6 +310,73 @@ def test_run_task_decodes_utf8_process_output(tmp_path: Path, monkeypatch) -> No
     assert store.get(task["task_id"])["status"] == "succeeded"
     assert store.read_stdout(task["task_id"]) == "done \u2603\ufffd"
     assert store.read_stderr(task["task_id"]) == "warn \ufffd"
+
+
+def test_delegate_popen_oserror_marks_failed(tmp_path: Path, monkeypatch) -> None:
+    """If subprocess.Popen raises OSError in the delegate path, the task
+    should be marked failed with the error in stderr, not stuck at running."""
+    store = TaskStore(tmp_path / "state")
+    registry = ExecutorRegistry(
+        store=store,
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
+    )
+
+    # Monkeypatch Popen to raise OSError so the delegate path hits it
+    monkeypatch.setattr(
+        executors.subprocess,
+        "Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("No such executable")),
+    )
+
+    task = registry.submit(task="will fail", executor="codex", cwd=tmp_path, timeout=5)
+    task_id = task["task_id"]
+
+    result = registry.wait(task_id, timeout=5, poll_interval=0.05)
+    assert result["status"] == "failed"
+
+
+def test_delegate_popen_oserror_writes_error_to_logs(tmp_path: Path, monkeypatch) -> None:
+    """When Popen raises OSError, the exception message should appear in
+    stderr and summary."""
+    store = TaskStore(tmp_path / "state")
+    registry = ExecutorRegistry(
+        store=store,
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
+    )
+
+    # Monkeypatch Popen to raise OSError
+    monkeypatch.setattr(
+        executors.subprocess,
+        "Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("No such executable")),
+    )
+
+    # Create a task and run it directly (bypass submit's thread for simplicity)
+    task = store.create(task="oserror test", executor="codex", cwd=str(tmp_path), timeout=5)
+    cancel_event = threading.Event()
+
+    registry._run_task(
+        task_id=task["task_id"],
+        executor_name="codex",
+        command="codex",
+        task="oserror test",
+        goal=None,
+        cwd=tmp_path,
+        timeout=5,
+        cancel_event=cancel_event,
+        context_files=[],
+        acceptance_criteria=[],
+        verification_commands=[],
+        commit_mode="allowed",
+        output_schema=None,
+        parse_structured_output=True,
+    )
+
+    meta = store.get(task["task_id"])
+    assert meta["status"] == "failed"
+    assert "No such executable" in store.read_stderr(task["task_id"])
 
 
 def test_delegate_task_extracts_structured_json_output(tmp_path: Path) -> None:

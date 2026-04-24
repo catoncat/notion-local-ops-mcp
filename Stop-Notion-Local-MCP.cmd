@@ -4,7 +4,8 @@ setlocal
 
 chcp 65001 >nul
 
-set "SCRIPT=D:\Program Files\notion-local-mcp\scripts\stop-mcp-manager.ps1"
+set "SCRIPT_DIR=%~dp0"
+set "SCRIPT=%SCRIPT_DIR%scripts\stop-mcp-manager.ps1"
 
 if not exist "%SCRIPT%" (
 

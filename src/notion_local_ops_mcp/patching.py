@@ -342,6 +342,23 @@ def apply_patch(
 ) -> dict[str, object]:
     try:
         operations = parse_patch(patch)
+        # Detect duplicate targets — same path referenced by more than one
+        # operation in a single patch.  Multiple hunks in a single Update
+        # are fine, but two separate operations targeting the same file can
+        # lead to incorrect results (e.g. Add then Update overwrites the Add).
+        seen_paths: list[str] = []
+        for op in operations:
+            if op.path in seen_paths:
+                return _error(
+                    "duplicate_patch_target",
+                    (
+                        f"Same file '{op.path}' appears in more than one patch "
+                        "operation. Merge multiple hunks into a single Update "
+                        "File, or split into separate apply_patch calls."
+                    ),
+                    path=op.path,
+                )
+            seen_paths.append(op.path)
         planned_changes: list[PlannedChange] = []
         for operation in operations:
             if isinstance(operation, AddFilePatch):

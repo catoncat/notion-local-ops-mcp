@@ -264,3 +264,42 @@ def test_git_blame_line_range_restricts_entries(tmp_path: Path) -> None:
     assert result["success"] is True
     assert [entry["line"] for entry in result["entries"]] == [2, 3]
     assert [entry["content"] for entry in result["entries"]] == ["b", "c"]
+
+
+def test_git_commit_paths_does_not_include_unrelated_staged_files(tmp_path: Path) -> None:
+    """When paths are specified, only those paths should be committed —
+    unrelated staged files should remain staged but not committed."""
+    _init_repo(tmp_path)
+    a = tmp_path / "a.txt"
+    b = tmp_path / "b.txt"
+    a.write_text("a\n", encoding="utf-8")
+    b.write_text("b\n", encoding="utf-8")
+    # Stage both files and commit as init
+    subprocess.run(["git", "add", "a.txt", "b.txt"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    # Modify both
+    a.write_text("a2\n", encoding="utf-8")
+    b.write_text("b2\n", encoding="utf-8")
+    # Stage b.txt separately (unrelated staged change)
+    subprocess.run(["git", "add", "b.txt"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    # Commit only a.txt
+    result = git_commit(cwd=tmp_path, message="feat: update a only", paths=["a.txt"])
+    assert result["success"] is True
+    assert "a.txt" in result["files"]
+    assert "b.txt" not in result["files"]
+    # b.txt should still be staged
+    status = git_status(cwd=tmp_path)
+    assert "b.txt" in status["staged"]
+
+
+def test_git_commit_stage_all_still_commits_all(tmp_path: Path) -> None:
+    """stage_all=True should commit all changes regardless of prior staging."""
+    _init_repo(tmp_path)
+    a = tmp_path / "a.txt"
+    a.write_text("a\n", encoding="utf-8")
+    subprocess.run(["git", "add", "a.txt"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    a.write_text("a2\n", encoding="utf-8")
+    result = git_commit(cwd=tmp_path, message="feat: stage all", stage_all=True)
+    assert result["success"] is True
+    assert "a.txt" in result["files"]

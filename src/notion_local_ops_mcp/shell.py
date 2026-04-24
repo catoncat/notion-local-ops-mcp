@@ -11,6 +11,14 @@ from pathlib import Path
 TIMEOUT_EXIT_CODE = -1
 
 
+def _decode_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return value.decode("utf-8", errors="replace")
+
+
 def run_command(*, command: str, cwd: Path, timeout: int) -> dict[str, object]:
     if not cwd.exists():
         return {
@@ -65,8 +73,8 @@ def run_command(*, command: str, cwd: Path, timeout: int) -> dict[str, object]:
             "command": command,
             "cwd": str(cwd),
             "exit_code": TIMEOUT_EXIT_CODE,
-            "stdout": exc.stdout or "",
-            "stderr": exc.stderr or "",
+            "stdout": _decode_output(exc.stdout),
+            "stderr": _decode_output(exc.stderr),
             "timed_out": True,
             "timeout": timeout,
             "error": {
