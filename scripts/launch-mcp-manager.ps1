@@ -939,6 +939,7 @@ function Invoke-PublicMcpProbe {
             Success = $false
             StatusCode = 0
             Message = 'missing public MCP URL'
+            IsTransientError = $false
         }
     }
 
@@ -947,32 +948,84 @@ function Invoke-PublicMcpProbe {
         $headers['Authorization'] = "Bearer $($Instance.Token)"
     }
 
-    try {
-        $response = Invoke-WebRequest -Uri $Instance.PublicMcpUrl -Method Head -Headers $headers -UseBasicParsing -TimeoutSec $TimeoutSeconds
-        $statusCode = [int]$response.StatusCode
-        return [pscustomobject]@{
-            Success = ($statusCode -eq 200 -or $statusCode -eq 204)
-            StatusCode = $statusCode
-            Message = "HTTP $statusCode"
+    # Try HEAD first; if it fails with a connection/TLS error, fall back to GET.
+    # Cloudflare quick tunnels sometimes drop HEAD requests due to TLS handshake
+    # issues ("基础连接已经关闭"), while GET works reliably.
+    foreach ($method in @('Head', 'Get')) {
+        try {
+            $response = Invoke-WebRequest -Uri $Instance.PublicMcpUrl -Method $method -Headers $headers -UseBasicParsing -TimeoutSec $TimeoutSeconds
+            $statusCode = [int]$response.StatusCode
+            return [pscustomobject]@{
+                Success = ($statusCode -eq 200 -or $statusCode -eq 204)
+                StatusCode = $statusCode
+                Message = "HTTP $statusCode ($method)"
+                IsTransientError = $false
+            }
+        }
+        catch {
+            $statusCode = 0
+            $message = $_.Exception.Message
+            $response = $_.Exception.Response
+            if ($null -ne $response) {
+                try {
+                    $statusCode = [int]$response.StatusCode.value__
+                    $message = "HTTP $statusCode ($method)"
+                }
+                catch {
+                }
+            }
+
+            # Classify: connection-level errors (TLS, DNS, socket) are transient
+            # and should NOT count the same as a definitive HTTP error (404, 405).
+            $isTransient = $statusCode -eq 0 -and (
+                $message.Contains('基础连接已经关闭') -or
+                $message.Contains('发送时发生错误') -or
+                $message.Contains('接收时发生错误') -or
+                $message.Contains('Unable to read data') -or
+                $message.Contains('Unable to write data') -or
+                $message.Contains('The connection was closed') -or
+                $message.Contains('SSL/TLS') -or
+                $message.Contains('secure channel') -or
+                $message.Contains('Could not create SSL/TLS') -or
+                $message.Contains('remote name could not be resolved') -or
+                $message.Contains('No such host') -or
+                $message.Contains('connection attempt failed') -or
+                $message.Contains('Operation timed out')
+            )
+
+            if ($isTransient) {
+                # Transient connection error — don't retry with GET, it'll likely
+                # hit the same TLS issue. Return as transient so monitor can
+                # handle it differently.
+                return [pscustomobject]@{
+                    Success = $false
+                    StatusCode = $statusCode
+                    Message = "transient: $message"
+                    IsTransientError = $true
+                }
+            }
+
+            # Got an HTTP-level error (4xx, 5xx) — if this was HEAD, try GET next
+            if ($method -eq 'Head') {
+                continue
+            }
+
+            # GET also failed with an HTTP error — definitive failure
+            return [pscustomobject]@{
+                Success = $false
+                StatusCode = $statusCode
+                Message = $message
+                IsTransientError = $false
+            }
         }
     }
-    catch {
-        $statusCode = 0
-        $message = $_.Exception.Message
-        $response = $_.Exception.Response
-        if ($null -ne $response) {
-            try {
-                $statusCode = [int]$response.StatusCode.value__
-                $message = "HTTP $statusCode"
-            }
-            catch {
-            }
-        }
-        return [pscustomobject]@{
-            Success = $false
-            StatusCode = $statusCode
-            Message = $message
-        }
+
+    # Both HEAD and GET failed at HTTP level
+    return [pscustomobject]@{
+        Success = $false
+        StatusCode = 0
+        Message = 'both HEAD and GET failed'
+        IsTransientError = $false
     }
 }
 
@@ -1384,8 +1437,10 @@ function Monitor-ManagedInstance {
             $Instance.ConsecutivePublicProbeFailures = [int]$Instance.ConsecutivePublicProbeFailures + 1
             $Instance.LastPublicProbeStatus = 'failed'
             $Instance.LastPublicProbeMessage = $publicProbe.Message
-            $Instance.LastFailureReason = "Public MCP probe failed ($($Instance.ConsecutivePublicProbeFailures)/5): $($publicProbe.Message)"
-            if ($Instance.ConsecutivePublicProbeFailures -ge 5) {
+            # Transient TLS/connection errors need more failures before triggering restart
+            $threshold = if ($publicProbe.IsTransientError) { 8 } else { 5 }
+            $Instance.LastFailureReason = "Public MCP probe failed ($($Instance.ConsecutivePublicProbeFailures)/$threshold): $($publicProbe.Message)"
+            if ($Instance.ConsecutivePublicProbeFailures -ge $threshold) {
                 # Sanity check: verify local HEAD /mcp before deciding to restart tunnel only
                 $localHeadProbe = Invoke-LocalMcpProbe -Instance $Instance
                 if ($localHeadProbe.Success) {
@@ -1395,7 +1450,7 @@ function Monitor-ManagedInstance {
                         -RuntimeConfig $RuntimeConfig `
                         -RestartServer $false `
                         -RestartTunnel $true `
-                        -Reason "Public MCP probe failed 5 times (local HEAD OK): $($publicProbe.Message)")
+                        -Reason "Public MCP probe failed $threshold times (local HEAD OK): $($publicProbe.Message)")
                 }
                 else {
                     # Local HEAD also failing — full restart
@@ -1404,7 +1459,7 @@ function Monitor-ManagedInstance {
                         -RuntimeConfig $RuntimeConfig `
                         -RestartServer $true `
                         -RestartTunnel $true `
-                        -Reason "Public MCP probe failed 5 times + local HEAD also failed: local=$($localHeadProbe.Message) public=$($publicProbe.Message)")
+                        -Reason "Public MCP probe failed $threshold times + local HEAD also failed: local=$($localHeadProbe.Message) public=$($publicProbe.Message)")
                 }
             }
         }
