@@ -18,6 +18,7 @@ from .config import (
     HOST,
     PORT,
     STATE_DIR,
+    STREAM_OUTPUT_INTERVAL,
     WORKSPACE_ROOT,
     ensure_runtime_directories,
 )
@@ -333,6 +334,7 @@ async def server_info() -> dict[str, object]:
         "command_timeout_seconds": COMMAND_TIMEOUT,
         "delegate_timeout_seconds": DELEGATE_TIMEOUT,
         "http_keepalive_timeout_seconds": HTTP_KEEPALIVE_TIMEOUT,
+        "stream_output_interval_seconds": STREAM_OUTPUT_INTERVAL,
         "auth": "bearer" if AUTH_TOKEN else "none",
         "debug_mcp_logging": bool(DEBUG_MCP_LOGGING),
         "codex_command": CODEX_COMMAND,
@@ -684,11 +686,13 @@ def main() -> None:
     print(f"debug_mcp_logging={DEBUG_MCP_LOGGING}")
     print(f"timeout_keep_alive={HTTP_KEEPALIVE_TIMEOUT}")
     app = build_http_app()
+    # None means unlimited; uvicorn needs an int, so use a very large value (~68 years)
+    effective_keepalive = HTTP_KEEPALIVE_TIMEOUT if HTTP_KEEPALIVE_TIMEOUT is not None else 2**31 - 1
     uvicorn.run(
         app,
         host=HOST,
         port=PORT,
-        timeout_keep_alive=HTTP_KEEPALIVE_TIMEOUT
+        timeout_keep_alive=effective_keepalive,
     )
 
 

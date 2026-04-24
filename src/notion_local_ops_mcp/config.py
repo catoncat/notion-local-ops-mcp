@@ -55,8 +55,16 @@ COMMAND_TIMEOUT = int(os.environ.get("NOTION_LOCAL_OPS_COMMAND_TIMEOUT", "120"))
 DELEGATE_TIMEOUT = int(os.environ.get("NOTION_LOCAL_OPS_DELEGATE_TIMEOUT", "1800"))
 DEBUG_MCP_LOGGING = _env_flag("NOTION_LOCAL_OPS_DEBUG_MCP_LOGGING", default=False)
 
-# HTTP keep-alive timeout for uvicorn (default 3600 seconds / 1 hour)
-HTTP_KEEPALIVE_TIMEOUT = int(os.environ.get("NOTION_LOCAL_OPS_HTTP_KEEPALIVE_TIMEOUT", "3600"))
+# HTTP keep-alive timeout for uvicorn (None = unlimited/infinite)
+# Set to a positive integer (e.g., 3600) to enforce a max idle time
+HTTP_KEEPALIVE_TIMEOUT = os.environ.get("NOTION_LOCAL_OPS_HTTP_KEEPALIVE_TIMEOUT")
+if HTTP_KEEPALIVE_TIMEOUT is not None:
+    HTTP_KEEPALIVE_TIMEOUT = int(HTTP_KEEPALIVE_TIMEOUT)
+else:
+    HTTP_KEEPALIVE_TIMEOUT = None  # Unlimited keep-alive
+
+# Stream output interval in seconds for long-running tasks (default 0.5s)
+STREAM_OUTPUT_INTERVAL = float(os.environ.get("NOTION_LOCAL_OPS_STREAM_OUTPUT_INTERVAL", "0.5"))
 
 
 def ensure_runtime_directories() -> None:

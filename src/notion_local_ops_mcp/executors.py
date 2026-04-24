@@ -12,7 +12,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PureWindowsPath
 
+from .config import STREAM_OUTPUT_INTERVAL
 from .tasks import TaskStore
+
+
+class _StreamTimeout(Exception):
+    """Raised by _stream_process when the deadline is exceeded."""
 
 
 TERMINAL_TASK_STATUSES = {"succeeded", "failed", "cancelled"}
@@ -364,6 +369,81 @@ class ExecutorRegistry:
         finally:
             self._mark_completed(task_id)
 
+    def _stream_process(
+        self,
+        task_id: str,
+        process: subprocess.Popen,
+        timeout: int,
+        cancel_event: threading.Event,
+    ) -> tuple[str, str]:
+        """Read process output incrementally, flushing to store periodically.
+
+        Returns (stdout, stderr) as decoded strings.
+        Raises _StreamTimeout if the deadline is exceeded.
+        """
+        stdout_buf = bytearray()
+        stderr_buf = bytearray()
+        buf_lock = threading.Lock()
+
+        def _reader(stream: object, buf: bytearray) -> None:
+            while True:
+                chunk = stream.read(4096)  # type: ignore[union-attr]
+                if not chunk:
+                    break
+                with buf_lock:
+                    buf.extend(chunk)
+
+        t_out = threading.Thread(target=_reader, args=(process.stdout, stdout_buf), daemon=True)
+        t_err = threading.Thread(target=_reader, args=(process.stderr, stderr_buf), daemon=True)
+        t_out.start()
+        t_err.start()
+
+        deadline = time.monotonic() + timeout
+        timed_out = False
+        interval = STREAM_OUTPUT_INTERVAL
+        # Use a short poll tick so process exit is detected quickly;
+        # only flush to disk every `interval` seconds.
+        poll_tick = min(0.05, interval)
+        last_flush = time.monotonic()
+
+        while process.poll() is None:
+            if cancel_event.is_set():
+                process.kill()
+                break
+            if time.monotonic() >= deadline:
+                process.kill()
+                timed_out = True
+                break
+            now = time.monotonic()
+            if now - last_flush >= interval:
+                # Flush current output to disk so get_task sees live progress
+                with buf_lock:
+                    so = _decode_output(bytes(stdout_buf))
+                    se = _decode_output(bytes(stderr_buf))
+                self.store.write_logs(task_id, stdout=so, stderr=se)
+                self.store.write_summary(task_id, _summarize(so, se))
+                last_flush = now
+            time.sleep(poll_tick)
+
+        # Wait for reader threads to drain remaining data
+        t_out.join(timeout=5)
+        t_err.join(timeout=5)
+
+        # Final flush
+        stdout = _decode_output(bytes(stdout_buf))
+        stderr = _decode_output(bytes(stderr_buf))
+        self.store.write_logs(task_id, stdout=stdout, stderr=stderr)
+        self.store.write_summary(task_id, _summarize(stdout, stderr))
+
+        with self._lock:
+            self._processes.pop(task_id, None)
+
+        if timed_out:
+            self.store.update(task_id, status="failed", timed_out=True)
+            raise _StreamTimeout()
+
+        return stdout, stderr
+
     def _run_task_impl(
         self,
         task_id: str,
@@ -412,24 +492,9 @@ class ExecutorRegistry:
             process.kill()
 
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            stdout, stderr = process.communicate()
-            stdout = _decode_output(stdout)
-            stderr = _decode_output(stderr)
-            self.store.write_logs(task_id, stdout=stdout, stderr=stderr)
-            self.store.write_summary(task_id, _summarize(stdout, stderr))
-            self.store.update(task_id, status="failed", timed_out=True)
+            stdout, stderr = self._stream_process(task_id, process, timeout, cancel_event)
+        except _StreamTimeout:
             return
-        finally:
-            with self._lock:
-                self._processes.pop(task_id, None)
-
-        stdout = _decode_output(stdout)
-        stderr = _decode_output(stderr)
-        self.store.write_logs(task_id, stdout=stdout, stderr=stderr)
-        self.store.write_summary(task_id, _summarize(stdout, stderr))
 
         structured_output = None
         if parse_structured_output:
@@ -495,24 +560,10 @@ class ExecutorRegistry:
             process.kill()
 
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            stdout, stderr = process.communicate()
-            stdout = _decode_output(stdout)
-            stderr = _decode_output(stderr)
-            self.store.write_logs(task_id, stdout=stdout, stderr=stderr)
-            self.store.write_summary(task_id, _summarize(stdout, stderr))
-            self.store.update(task_id, status="failed", timed_out=True)
+            stdout, stderr = self._stream_process(task_id, process, timeout, cancel_event)
+        except _StreamTimeout:
             return
-        finally:
-            with self._lock:
-                self._processes.pop(task_id, None)
 
-        stdout = _decode_output(stdout)
-        stderr = _decode_output(stderr)
-        self.store.write_logs(task_id, stdout=stdout, stderr=stderr)
-        self.store.write_summary(task_id, _summarize(stdout, stderr))
         structured_output = _extract_structured_output(stdout) or _extract_structured_output(stderr)
 
         if cancel_event.is_set() or self.store.get(task_id)["status"] == "cancelled":

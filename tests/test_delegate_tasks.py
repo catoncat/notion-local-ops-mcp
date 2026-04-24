@@ -254,16 +254,30 @@ def test_run_task_decodes_utf8_process_output(tmp_path: Path, monkeypatch) -> No
 
     popen_kwargs: dict[str, object] = {}
 
+    class FakeStream:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+            self._read = False
+
+        def read(self, n: int = -1) -> bytes:
+            if self._read:
+                return b""
+            self._read = True
+            return self._data
+
     class FakeProcess:
         def __init__(self, *args, **kwargs) -> None:
             popen_kwargs.update(kwargs)
             self.returncode = 0
+            self.stdout = FakeStream(b"done \xe2\x98\x83\xff")
+            self.stderr = FakeStream(b"warn \xff")
+            self._polled = False
 
         def poll(self):
-            return None
-
-        def communicate(self, timeout=None):
-            return (b"done \xe2\x98\x83\xff", b"warn \xff")
+            if not self._polled:
+                self._polled = True
+                return None
+            return 0
 
         def kill(self) -> None:
             return None
