@@ -918,6 +918,9 @@ function Start-QuickTunnel {
     $Instance.PublicUrl = $quickTunnelUrl
     $Instance.PublicMcpUrl = "$quickTunnelUrl/mcp"
     $Instance.TunnelMode = 'quick'
+    $Instance.ProbeWarmupCyclesRemaining = 3
+    $Instance.LastPublicProbeStatus = 'pending'
+    $Instance.LastPublicProbeMessage = 'waiting for public tunnel warm-up'
     if (-not [string]::IsNullOrWhiteSpace($oldPublicMcpUrl) -and $oldPublicMcpUrl -ne $Instance.PublicMcpUrl) {
         $Instance.NeedsNotionUrlUpdate = $true
         $Instance.UrlChangedAt = (Get-Date).ToString('o')
@@ -1090,10 +1093,7 @@ function Repair-Instance {
 
         $Instance.ConsecutivePublicProbeFailures = 0
         $Instance.ConsecutiveRepairFailures = 0
-        $Instance.LastPublicProbeStatus = 'pending'
-        $Instance.LastPublicProbeMessage = 'waiting for next probe after repair'
         $Instance.LastFailureReason = ''
-        $Instance.ProbeWarmupCyclesRemaining = 3
         return $true
     }
     catch {
