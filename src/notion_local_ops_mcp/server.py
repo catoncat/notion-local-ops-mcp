@@ -80,8 +80,39 @@ def _current_debug_mcp_logging() -> bool:
     return bool(globals().get("DEBUG_MCP_LOGGING", False))
 
 
+READ_ONLY_TOOL = {
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": False,
+}
+
+LOCAL_STATE_TOOL = {
+    "readOnlyHint": False,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": False,
+}
+
+LOCAL_WRITE_TOOL = {
+    "readOnlyHint": False,
+    "destructiveHint": True,
+    "idempotentHint": False,
+    "openWorldHint": False,
+}
+
+OPEN_WORLD_WRITE_TOOL = {
+    "readOnlyHint": False,
+    "destructiveHint": True,
+    "idempotentHint": False,
+    "openWorldHint": True,
+}
+
+
 @mcp.tool(
     name="list_skills",
+    title="List Skills",
+    annotations=READ_ONLY_TOOL,
     description=(
         "List project and global agent skills as lightweight summaries. "
         "Returns skill name, description, preferred path, and source locations. "
@@ -109,6 +140,8 @@ def list_skills(
 
 @mcp.tool(
     name="list_files",
+    title="List Files",
+    annotations=READ_ONLY_TOOL,
     description=(
         "List files and directories. Hidden entries, common junk dirs "
         "(.git / .venv / node_modules / __pycache__ / ...) and .gitignore'd "
@@ -140,6 +173,8 @@ def list_files(
 
 @mcp.tool(
     name="search",
+    title="Search Workspace",
+    annotations=READ_ONLY_TOOL,
     description=(
         "Canonical search tool that unifies glob, regex grep, and plain-text search. "
         "Use mode='glob' for path discovery, mode='regex' for code/text regex, and "
@@ -235,6 +270,8 @@ def search(
 
 @mcp.tool(
     name="read_text",
+    title="Read Text",
+    annotations=READ_ONLY_TOOL,
     description=(
         "Canonical text-reader tool. Pass either `path` for single-file reads or "
         "`paths` for batch reads. Pagination is line-based via start_line/line_limit. "
@@ -291,6 +328,8 @@ def read_text(
 
 @mcp.tool(
     name="write_file",
+    title="Write File",
+    annotations=LOCAL_WRITE_TOOL,
     description="Write full content to a file (supports dry_run preview without touching disk).",
 )
 def write_file(path: str, content: str, dry_run: bool = False) -> dict[str, object]:
@@ -300,6 +339,8 @@ def write_file(path: str, content: str, dry_run: bool = False) -> dict[str, obje
 
 @mcp.tool(
     name="apply_patch",
+    title="Apply Patch",
+    annotations=LOCAL_WRITE_TOOL,
     description=(
         "Apply a structured patch using *** Begin Patch / *** Update File blocks. "
         "Each @@ hunk must contain at least one '+' or '-' line and must "
@@ -323,6 +364,8 @@ def apply_patch(
 
 @mcp.tool(
     name="server_info",
+    title="Server Info",
+    annotations=READ_ONLY_TOOL,
     description=(
         "Return server metadata: app name, host/port, workspace root, state dir, "
         "timeouts, auth mode, and the list of registered tools. Useful as a first "
@@ -359,6 +402,8 @@ async def server_info() -> dict[str, object]:
 
 @mcp.tool(
     name="set_default_cwd",
+    title="Set Default CWD",
+    annotations=LOCAL_STATE_TOOL,
     description=(
         "Set the session-wide default working directory used whenever a tool call "
         "omits `cwd`. Pass null (or omit path) to clear the override and fall back to "
@@ -405,6 +450,8 @@ def set_default_cwd(path: str | None = None) -> dict[str, object]:
 
 @mcp.tool(
     name="get_default_cwd",
+    title="Get Default CWD",
+    annotations=READ_ONLY_TOOL,
     description=(
         "Return the currently active default working directory and whether it comes "
         "from the session override (set_default_cwd) or from the server's workspace root."
@@ -424,6 +471,8 @@ def get_default_cwd() -> dict[str, object]:
 
 @mcp.tool(
     name="git_status",
+    title="Git Status",
+    annotations=READ_ONLY_TOOL,
     description="Return structured git status for the repository at cwd or the current workspace root.",
 )
 def git_status(cwd: str | None = None) -> dict[str, object]:
@@ -433,6 +482,8 @@ def git_status(cwd: str | None = None) -> dict[str, object]:
 
 @mcp.tool(
     name="git_diff",
+    title="Git Diff",
+    annotations=READ_ONLY_TOOL,
     description=(
         "Return git diff output plus per-file diffs with added/removed counts. "
         "Each file is truncated independently to per_file_max_bytes so a single huge "
@@ -458,6 +509,8 @@ def git_diff(
 
 @mcp.tool(
     name="git_commit",
+    title="Git Commit",
+    annotations=LOCAL_WRITE_TOOL,
     description=(
         "Create a git commit for staged changes, selected paths, or all current changes. "
         "Supports amend (rewrite HEAD), allow_empty (commit without changes), custom author, "
@@ -491,6 +544,8 @@ def git_commit(
 
 @mcp.tool(
     name="git_log",
+    title="Git Log",
+    annotations=READ_ONLY_TOOL,
     description="Return recent git commits for the repository at cwd.",
 )
 def git_log(cwd: str | None = None, limit: int = 10) -> dict[str, object]:
@@ -500,6 +555,8 @@ def git_log(cwd: str | None = None, limit: int = 10) -> dict[str, object]:
 
 @mcp.tool(
     name="git_show",
+    title="Git Show",
+    annotations=READ_ONLY_TOOL,
     description=(
         "Show metadata + per-file diff for a commit or any git ref (defaults to HEAD). "
         "Useful for inspecting a specific commit without shelling out."
@@ -522,6 +579,8 @@ def git_show(
 
 @mcp.tool(
     name="git_blame",
+    title="Git Blame",
+    annotations=READ_ONLY_TOOL,
     description=(
         "Return per-line blame info (commit, author, summary, content) for a file. "
         "Restrict to a line range via start_line / end_line."
@@ -546,6 +605,8 @@ def git_blame(
 
 @mcp.tool(
     name="run_command",
+    title="Run Command",
+    annotations=OPEN_WORLD_WRITE_TOOL,
     description="Run a local shell command now or queue it as a background task for wait_task/get_task polling.",
 )
 def run_command(
@@ -571,6 +632,8 @@ def run_command(
 
 @mcp.tool(
     name="run_command_stream",
+    title="Run Command Stream",
+    annotations=OPEN_WORLD_WRITE_TOOL,
     description=(
         "Start a shell command in background and return task_id immediately for "
         "stream-like polling via get_task/wait_task."
@@ -595,6 +658,8 @@ def run_command_stream(
 
 @mcp.tool(
     name="delegate_task",
+    title="Delegate Task",
+    annotations=OPEN_WORLD_WRITE_TOOL,
     description=(
         "Fallback only. Use this when direct tools are insufficient for a complex, long-running, or "
         "multi-file task. Supported executors: auto, codex, claude-code. "
@@ -633,6 +698,8 @@ def delegate_task(
 
 @mcp.tool(
     name="get_task",
+    title="Get Task",
+    annotations=READ_ONLY_TOOL,
     description="Get the current status and output tail for a delegated or background shell task.",
 )
 def get_task(task_id: str) -> dict[str, object]:
@@ -641,6 +708,8 @@ def get_task(task_id: str) -> dict[str, object]:
 
 @mcp.tool(
     name="wait_task",
+    title="Wait Task",
+    annotations=READ_ONLY_TOOL,
     description="Wait for a delegated or background shell task to finish or until timeout, then return its latest status and output tail.",
 )
 def wait_task(task_id: str, timeout: float = 30, poll_interval: float = 0.5) -> dict[str, object]:
@@ -649,6 +718,8 @@ def wait_task(task_id: str, timeout: float = 30, poll_interval: float = 0.5) -> 
 
 @mcp.tool(
     name="cancel_task",
+    title="Cancel Task",
+    annotations=LOCAL_WRITE_TOOL,
     description="Cancel a delegated or background shell task if it is still running.",
 )
 def cancel_task(task_id: str) -> dict[str, object]:
@@ -657,6 +728,8 @@ def cancel_task(task_id: str) -> dict[str, object]:
 
 @mcp.tool(
     name="purge_tasks",
+    title="Purge Tasks",
+    annotations=LOCAL_WRITE_TOOL,
     description=(
         "Delete old task metadata/log directories under STATE_DIR/tasks. "
         "Defaults to 7 days; supports dry_run preview."

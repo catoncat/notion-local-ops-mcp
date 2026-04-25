@@ -300,3 +300,34 @@ def test_server_apply_patch_tool_description_uses_generic_patch_language() -> No
 
     assert "codex-style" not in description
     assert "*** Begin Patch" in description
+
+
+def test_server_tools_expose_chatgpt_compatible_annotations() -> None:
+    from notion_local_ops_mcp import server
+
+    async def scenario() -> dict[str, dict[str, object]]:
+        list_tools = getattr(server.mcp, "_list_tools")
+        try:
+            tools = await list_tools()
+        except TypeError:
+            tools = await list_tools(None)
+        return {
+            tool.name: {
+                "title": tool.title,
+                "annotations": tool.annotations.model_dump(exclude_none=True),
+            }
+            for tool in tools
+        }
+
+    descriptors = asyncio.run(scenario())
+    annotations = {name: value["annotations"] for name, value in descriptors.items()}
+
+    assert annotations
+    assert all(value["title"] for value in descriptors.values())
+    assert all(value for value in annotations.values())
+    assert annotations["server_info"]["readOnlyHint"] is True
+    assert annotations["search"]["readOnlyHint"] is True
+    assert annotations["write_file"]["readOnlyHint"] is False
+    assert annotations["write_file"]["destructiveHint"] is True
+    assert annotations["run_command"]["openWorldHint"] is True
+    assert annotations["delegate_task"]["openWorldHint"] is True
