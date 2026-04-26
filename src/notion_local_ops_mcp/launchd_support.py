@@ -7,6 +7,7 @@ from typing import Mapping, Any
 
 DEFAULT_LAUNCHD_LABEL_PREFIX = "com.notion-local-ops"
 DEFAULT_LAUNCHD_LOG_DIRNAME = "notion-local-ops-mcp"
+DEFAULT_MCP_MAX_FILES = 4096
 
 
 @dataclass(frozen=True)
@@ -64,7 +65,7 @@ def build_mcp_launch_agent(config: LaunchdServiceConfig) -> dict[str, Any]:
         for key, value in config.env.items()
         if value is not None and value != ""
     }
-    return _base_launch_agent(
+    payload = _base_launch_agent(
         label=mcp_service_label(config.label_prefix),
         working_directory=config.repo_root,
         stdout_path=config.logs_dir / "mcp.stdout.log",
@@ -80,6 +81,9 @@ def build_mcp_launch_agent(config: LaunchdServiceConfig) -> dict[str, Any]:
         ],
         environment=environment,
     )
+    payload["SoftResourceLimits"] = {"NumberOfFiles": DEFAULT_MCP_MAX_FILES}
+    payload["HardResourceLimits"] = {"NumberOfFiles": DEFAULT_MCP_MAX_FILES}
+    return payload
 
 
 def build_cloudflared_launch_agent(config: LaunchdServiceConfig) -> dict[str, Any]:

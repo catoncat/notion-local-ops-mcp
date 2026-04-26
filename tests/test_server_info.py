@@ -16,7 +16,7 @@ def test_server_info_reports_metadata_and_tools() -> None:
     assert payload["app_name"] == "notion-local-ops-mcp"
     assert isinstance(payload["port"], int)
     assert isinstance(payload["workspace_root"], str)
-    assert payload["auth"] in {"bearer", "none"}
+    assert payload["auth"] in {"none", "shared_token", "oauth"}
     assert payload["command_timeout_seconds"] >= 1
     assert payload["delegate_timeout_seconds"] >= 1
     tools = payload["tools"]

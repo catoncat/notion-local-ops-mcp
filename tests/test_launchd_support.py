@@ -31,6 +31,10 @@ def _config(tmp_path: Path) -> LaunchdServiceConfig:
             "NOTION_LOCAL_OPS_WORKSPACE_ROOT": "/tmp/workspace",
             "NOTION_LOCAL_OPS_STATE_DIR": "/tmp/state",
             "NOTION_LOCAL_OPS_AUTH_TOKEN": "secret-token",
+            "NOTION_LOCAL_OPS_AUTH_MODE": "oauth",
+            "NOTION_LOCAL_OPS_PUBLIC_BASE_URL": "https://mcp.example.test",
+            "NOTION_LOCAL_OPS_OAUTH_SCOPES": "local-ops",
+            "NOTION_LOCAL_OPS_OAUTH_TOKEN_TTL_SECONDS": "86400",
             "NOTION_LOCAL_OPS_CODEX_COMMAND": "codex",
             "NOTION_LOCAL_OPS_CLAUDE_COMMAND": "claude",
             "NOTION_LOCAL_OPS_COMMAND_TIMEOUT": "120",
@@ -60,9 +64,13 @@ def test_build_mcp_launch_agent_contains_supervisor_and_runtime_env(tmp_path: Pa
         str(config.logs_dir / "mcp-server.log"),
     ]
     assert payload["EnvironmentVariables"]["NOTION_LOCAL_OPS_AUTH_TOKEN"] == "secret-token"
+    assert payload["EnvironmentVariables"]["NOTION_LOCAL_OPS_AUTH_MODE"] == "oauth"
+    assert payload["EnvironmentVariables"]["NOTION_LOCAL_OPS_PUBLIC_BASE_URL"] == "https://mcp.example.test"
     assert payload["EnvironmentVariables"]["PATH"] == "/opt/homebrew/bin:/usr/bin:/bin"
     assert payload["StandardOutPath"] == str(config.logs_dir / "mcp.stdout.log")
     assert payload["StandardErrorPath"] == str(config.logs_dir / "mcp.stderr.log")
+    assert payload["SoftResourceLimits"] == {"NumberOfFiles": 4096}
+    assert payload["HardResourceLimits"] == {"NumberOfFiles": 4096}
 
 
 def test_build_cloudflared_launch_agent_uses_named_tunnel_when_present(tmp_path: Path) -> None:

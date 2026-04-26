@@ -49,6 +49,15 @@ STATE_DIR = Path(
     os.environ.get("NOTION_LOCAL_OPS_STATE_DIR", str(Path.home() / ".notion-local-ops-mcp"))
 ).expanduser().resolve()
 AUTH_TOKEN = os.environ.get("NOTION_LOCAL_OPS_AUTH_TOKEN", "").strip()
+AUTH_MODE = os.environ.get("NOTION_LOCAL_OPS_AUTH_MODE", "").strip().lower()
+PUBLIC_BASE_URL = os.environ.get("NOTION_LOCAL_OPS_PUBLIC_BASE_URL", "").strip().rstrip("/")
+OAUTH_LOGIN_TOKEN = os.environ.get("NOTION_LOCAL_OPS_OAUTH_LOGIN_TOKEN", "").strip()
+OAUTH_SCOPES = tuple(
+    scope
+    for scope in os.environ.get("NOTION_LOCAL_OPS_OAUTH_SCOPES", "local-ops").split()
+    if scope
+)
+OAUTH_TOKEN_TTL_SECONDS = int(os.environ.get("NOTION_LOCAL_OPS_OAUTH_TOKEN_TTL_SECONDS", "86400"))
 CODEX_COMMAND = os.environ.get("NOTION_LOCAL_OPS_CODEX_COMMAND", "codex").strip()
 CLAUDE_COMMAND = os.environ.get("NOTION_LOCAL_OPS_CLAUDE_COMMAND", "claude").strip()
 COMMAND_TIMEOUT = int(os.environ.get("NOTION_LOCAL_OPS_COMMAND_TIMEOUT", "120"))

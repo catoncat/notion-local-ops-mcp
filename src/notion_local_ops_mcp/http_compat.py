@@ -10,10 +10,13 @@ from typing import Any, AsyncIterator, Callable
 from urllib.parse import parse_qs
 
 from starlette.applications import Starlette
-from starlette.middleware import Middleware as StarletteMiddleware
 from starlette.datastructures import Headers
-from starlette.responses import JSONResponse, Response
+from starlette.middleware import Middleware as StarletteMiddleware
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Mount, Route
+
+from .oauth import OAuthManager, OAuthRuntimeConfig
 
 SERVER_CARD_SCHEMA = "https://static.modelcontextprotocol.io/schemas/mcp-server-card/v1.json"
 PROTOCOL_VERSION = "2025-06-18"
@@ -31,9 +34,15 @@ MCP_METHOD_HEADERS = {
 }
 LEGACY_SSE_MESSAGE_PATHS = {"/messages", "/messages/"}
 DISCOVERY_PATHS = {"/.well-known/mcp.json", "/.well-known/mcp/server-card.json"}
-OAUTH_DISCOVERY_PATHS = {"/.well-known/oauth-authorization-server"}
+OAUTH_DISCOVERY_PATHS = {
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/openid-configuration",
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-protected-resource/mcp",
+}
 
 AuthTokenProvider = Callable[[], str]
+OAuthConfigProvider = Callable[[], OAuthRuntimeConfig]
 DebugEnabledProvider = Callable[[], bool]
 DEBUG_LOGGER = logging.getLogger("notion_local_ops_mcp.mcp_debug")
 
@@ -59,12 +68,34 @@ def _extract_bearer_token(authorization: str) -> str:
     return ""
 
 
+def _base_url_from_headers(headers: Headers, scheme: str = "https") -> str:
+    forwarded_proto = headers.get("x-forwarded-proto", "").split(",", 1)[0].strip()
+    forwarded_host = headers.get("x-forwarded-host", "").split(",", 1)[0].strip()
+    proto = forwarded_proto or scheme
+    host = forwarded_host or headers.get("host", "")
+    return f"{proto}://{host}".rstrip("/")
+
+
+async def _parse_request_data(request: Request) -> dict[str, Any]:
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        payload = await request.json()
+        return payload if isinstance(payload, dict) else {}
+    body = (await request.body()).decode("utf-8")
+    parsed = parse_qs(body, keep_blank_values=True)
+    return {key: values[-1] if values else "" for key, values in parsed.items()}
+
+
+def _string_values(data: dict[str, Any]) -> dict[str, str]:
+    return {key: str(value) for key, value in data.items() if value is not None}
+
+
 def _build_server_card(
     *,
     app_name: str,
     app_version: str,
     mcp_path: str,
-    auth_required: bool,
+    auth_schemes: list[str],
     instructions: str,
 ) -> dict[str, Any]:
     return {
@@ -84,8 +115,8 @@ def _build_server_card(
             "tools": {"listChanged": True},
         },
         "authentication": {
-            "required": auth_required,
-            "schemes": ["bearer"] if auth_required else [],
+            "required": bool(auth_schemes),
+            "schemes": auth_schemes,
         },
         "instructions": instructions,
     }
@@ -286,9 +317,19 @@ class HTTPBearerAuthMiddleware:
     allowed.
     """
 
-    def __init__(self, app: Any, get_auth_token: AuthTokenProvider) -> None:
+    def __init__(
+        self,
+        app: Any,
+        get_auth_token: AuthTokenProvider,
+        get_oauth_config: OAuthConfigProvider,
+        oauth_manager: OAuthManager,
+        mcp_path: str,
+    ) -> None:
         self.app = app
         self._get_auth_token = get_auth_token
+        self._get_oauth_config = get_oauth_config
+        self._oauth_manager = oauth_manager
+        self._mcp_path = mcp_path
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -297,29 +338,69 @@ class HTTPBearerAuthMiddleware:
 
         method = str(scope.get("method", "GET")).upper()
         path = str(scope.get("path", ""))
-        if method in {"OPTIONS", "HEAD"} or path in DISCOVERY_PATHS or path in OAUTH_DISCOVERY_PATHS:
+        if (
+            method in {"OPTIONS", "HEAD"}
+            or path in DISCOVERY_PATHS
+            or path in OAUTH_DISCOVERY_PATHS
+            or path.startswith("/oauth/")
+        ):
             await self.app(scope, receive, send)
             return
 
-        expected = (self._get_auth_token() or "").strip()
-        if not expected:
+        config = self._get_oauth_config()
+        auth_mode = config.normalized_auth_mode
+        if auth_mode == "none":
             await self.app(scope, receive, send)
             return
 
         provided = _extract_bearer_token(Headers(raw=scope.get("headers", [])).get("authorization", ""))
-        if provided != expected:
-            response = JSONResponse(
-                {"error": "unauthorized", "message": "Missing or invalid bearer token."},
-                status_code=401,
-                headers={
-                    "WWW-Authenticate": 'Bearer realm="mcp"',
-                    "Access-Control-Allow-Origin": "*",
-                },
-            )
-            await response(scope, receive, send)
+        if auth_mode == "shared_token":
+            if provided == (self._get_auth_token() or "").strip():
+                await self.app(scope, receive, send)
+                return
+            await self._unauthorized(scope, receive, send, oauth=False)
             return
 
-        await self.app(scope, receive, send)
+        if auth_mode == "oauth":
+            headers = Headers(raw=scope.get("headers", []))
+            fallback_base_url = _base_url_from_headers(headers, str(scope.get("scheme", "https")))
+            base_url = self._oauth_manager.metadata_base_url(fallback_base_url)
+            static_token_matches = bool(provided and config.auth_token and provided == config.auth_token)
+            oauth_token_matches = self._oauth_manager.verify_access_token(provided, base_url=base_url)
+            if static_token_matches or oauth_token_matches:
+                await self.app(scope, receive, send)
+                return
+            await self._unauthorized(scope, receive, send, oauth=True, base_url=base_url)
+            return
+
+        await self._unauthorized(scope, receive, send, oauth=False)
+
+    async def _unauthorized(
+        self,
+        scope: dict[str, Any],
+        receive: Any,
+        send: Any,
+        *,
+        oauth: bool,
+        base_url: str | None = None,
+    ) -> None:
+        if oauth and base_url:
+            challenge = (
+                f'Bearer realm="mcp", '
+                f'resource_metadata="{self._oauth_manager.resource_metadata_url(base_url)}", '
+                f'scope="{self._oauth_manager.scope_string()}"'
+            )
+        else:
+            challenge = 'Bearer realm="mcp"'
+        response = JSONResponse(
+            {"error": "unauthorized", "message": "Missing or invalid bearer token."},
+            status_code=401,
+            headers={
+                "WWW-Authenticate": challenge,
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+        await response(scope, receive, send)
 
 
 class MCPCompatibilityDispatcher:
@@ -332,6 +413,7 @@ class MCPCompatibilityDispatcher:
         app_version: str,
         mcp_path: str,
         get_auth_token: AuthTokenProvider,
+        get_oauth_config: OAuthConfigProvider,
         instructions: str,
     ) -> None:
         self.streamable_app = streamable_app
@@ -340,11 +422,18 @@ class MCPCompatibilityDispatcher:
         self.app_version = app_version
         self.mcp_path = mcp_path
         self._get_auth_token = get_auth_token
+        self._get_oauth_config = get_oauth_config
         self.instructions = instructions
 
     @property
-    def auth_required(self) -> bool:
-        return bool((self._get_auth_token() or "").strip())
+    def auth_schemes(self) -> list[str]:
+        config = self._get_oauth_config()
+        mode = config.normalized_auth_mode
+        if mode == "none":
+            return []
+        if mode == "oauth":
+            return ["oauth2", "bearer"]
+        return ["bearer"] if (self._get_auth_token() or "").strip() else []
 
     @property
     def server_card(self) -> dict[str, Any]:
@@ -352,7 +441,7 @@ class MCPCompatibilityDispatcher:
             app_name=self.app_name,
             app_version=self.app_version,
             mcp_path=self.mcp_path,
-            auth_required=self.auth_required,
+            auth_schemes=self.auth_schemes,
             instructions=self.instructions,
         )
 
@@ -423,10 +512,12 @@ def build_http_compat_app(
     app_name: str,
     mcp_path: str,
     get_auth_token: AuthTokenProvider,
+    get_oauth_config: OAuthConfigProvider,
     get_debug_enabled: DebugEnabledProvider,
     instructions: str,
 ) -> Starlette:
     app_version = _resolve_version(app_name)
+    oauth_manager = OAuthManager(get_oauth_config(), mcp_path=mcp_path)
     dispatcher = MCPCompatibilityDispatcher(
         streamable_app=streamable_app,
         legacy_sse_app=legacy_sse_app,
@@ -434,20 +525,103 @@ def build_http_compat_app(
         app_version=app_version,
         mcp_path=mcp_path,
         get_auth_token=get_auth_token,
+        get_oauth_config=get_oauth_config,
         instructions=instructions,
     )
+
+    def oauth_base_url(request: Request) -> str:
+        fallback = _base_url_from_headers(request.headers, request.url.scheme)
+        return oauth_manager.metadata_base_url(fallback)
+
+    def oauth_enabled() -> bool:
+        return get_oauth_config().normalized_auth_mode == "oauth"
 
     async def server_card(_: Request) -> JSONResponse:
         return JSONResponse(dispatcher.server_card, headers=DISCOVERY_HEADERS)
 
-    async def oauth_discovery(_: Request) -> Response:
-        return Response(status_code=404, headers=DISCOVERY_HEADERS)
+    async def oauth_authorization_server_metadata(request: Request) -> Response:
+        if not oauth_enabled():
+            return Response(status_code=404, headers=DISCOVERY_HEADERS)
+        return JSONResponse(
+            oauth_manager.authorization_server_metadata(oauth_base_url(request)),
+            headers=DISCOVERY_HEADERS,
+        )
+
+    async def oauth_protected_resource_metadata(request: Request) -> Response:
+        if not oauth_enabled():
+            return Response(status_code=404, headers=DISCOVERY_HEADERS)
+        return JSONResponse(
+            oauth_manager.protected_resource_metadata(oauth_base_url(request)),
+            headers=DISCOVERY_HEADERS,
+        )
+
+    async def oauth_register(request: Request) -> Response:
+        if not oauth_enabled():
+            return Response(status_code=404, headers=DISCOVERY_HEADERS)
+        try:
+            registration = oauth_manager.register_client(await _parse_request_data(request))
+        except ValueError as exc:
+            return JSONResponse(
+                {"error": "invalid_client_metadata", "error_description": str(exc)},
+                status_code=400,
+            )
+        return JSONResponse(registration, status_code=201)
+
+    async def oauth_authorize(request: Request) -> Response:
+        if not oauth_enabled():
+            return Response(status_code=404, headers=DISCOVERY_HEADERS)
+        if request.method == "GET":
+            return HTMLResponse(oauth_manager.authorize_page(dict(request.query_params)))
+        try:
+            redirect_url = oauth_manager.authorize(
+                _string_values(await _parse_request_data(request)),
+                base_url=oauth_base_url(request),
+            )
+        except PermissionError as exc:
+            return JSONResponse({"error": "access_denied", "error_description": str(exc)}, status_code=401)
+        except ValueError as exc:
+            return JSONResponse({"error": "invalid_request", "error_description": str(exc)}, status_code=400)
+        return RedirectResponse(redirect_url, status_code=303)
+
+    async def oauth_token(request: Request) -> Response:
+        if not oauth_enabled():
+            return Response(status_code=404, headers=DISCOVERY_HEADERS)
+        try:
+            token = oauth_manager.exchange_code(
+                _string_values(await _parse_request_data(request)),
+                base_url=oauth_base_url(request),
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": "invalid_grant", "error_description": str(exc)}, status_code=400)
+        return JSONResponse(token)
 
     app = Starlette(
         routes=[
             Route("/.well-known/mcp.json", endpoint=server_card, methods=["GET"]),
             Route("/.well-known/mcp/server-card.json", endpoint=server_card, methods=["GET"]),
-            Route("/.well-known/oauth-authorization-server", endpoint=oauth_discovery, methods=["GET"]),
+            Route(
+                "/.well-known/oauth-authorization-server",
+                endpoint=oauth_authorization_server_metadata,
+                methods=["GET"],
+            ),
+            Route(
+                "/.well-known/openid-configuration",
+                endpoint=oauth_authorization_server_metadata,
+                methods=["GET"],
+            ),
+            Route(
+                "/.well-known/oauth-protected-resource",
+                endpoint=oauth_protected_resource_metadata,
+                methods=["GET"],
+            ),
+            Route(
+                "/.well-known/oauth-protected-resource/mcp",
+                endpoint=oauth_protected_resource_metadata,
+                methods=["GET"],
+            ),
+            Route("/oauth/register", endpoint=oauth_register, methods=["POST"]),
+            Route("/oauth/authorize", endpoint=oauth_authorize, methods=["GET", "POST"]),
+            Route("/oauth/token", endpoint=oauth_token, methods=["POST"]),
             Mount("/", app=dispatcher),
         ],
         middleware=[
@@ -459,6 +633,9 @@ def build_http_compat_app(
             StarletteMiddleware(
                 HTTPBearerAuthMiddleware,
                 get_auth_token=get_auth_token,
+                get_oauth_config=get_oauth_config,
+                oauth_manager=oauth_manager,
+                mcp_path=mcp_path,
             ),
         ],
         lifespan=dispatcher.lifespan,

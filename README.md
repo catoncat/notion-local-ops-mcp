@@ -36,6 +36,52 @@ Use this in your MCP Agent configuration inside Notion:
 - Auth type: `Bearer`
 - Token: `NOTION_LOCAL_OPS_AUTH_TOKEN`
 
+## ChatGPT Web OAuth
+
+ChatGPT web developer mode expects an HTTPS MCP endpoint and can connect with
+OAuth. This project implements a minimal OAuth compatibility mode for local
+use: dynamic client registration, PKCE authorization code flow, protected
+resource metadata, and bearer access tokens. It does not implement a full user
+account system or ChatGPT iframe UI widgets.
+
+Enable OAuth mode in `.env`:
+
+```bash
+NOTION_LOCAL_OPS_AUTH_MODE=oauth
+NOTION_LOCAL_OPS_PUBLIC_BASE_URL="https://<your-domain-or-tunnel>"
+NOTION_LOCAL_OPS_AUTH_TOKEN="replace-me"
+# Optional: use a separate login token for the OAuth authorization page.
+# NOTION_LOCAL_OPS_OAUTH_LOGIN_TOKEN="replace-me"
+```
+
+Then restart the service. For launchd-managed installs, reinstall or restart so
+the generated plist receives the new env values:
+
+```bash
+./scripts/install-launchd.sh
+```
+
+Create the ChatGPT app/connector with:
+
+- MCP server URL: `https://<your-domain-or-tunnel>/mcp`
+- Authentication: `OAuth`
+- Client registration: dynamic registration, if ChatGPT offers the choice
+
+When ChatGPT opens the authorization page, enter `NOTION_LOCAL_OPS_AUTH_TOKEN`
+unless `NOTION_LOCAL_OPS_OAUTH_LOGIN_TOKEN` is set.
+
+Smoke-test the public OAuth surface before adding it to ChatGPT:
+
+```bash
+curl -sS https://<your-domain-or-tunnel>/.well-known/oauth-protected-resource/mcp
+curl -sS https://<your-domain-or-tunnel>/.well-known/oauth-authorization-server
+curl -i https://<your-domain-or-tunnel>/mcp
+```
+
+The first two commands should return JSON metadata. The `/mcp` request without
+credentials should return `401` with a `WWW-Authenticate` header containing
+`resource_metadata`.
+
 Use the prompt below for the **MCP Agent**. It is not for the Notion AI instruction page.
 
 <details>
@@ -306,6 +352,11 @@ cloudflared tunnel --config ./cloudflared-example.yml run <your-tunnel-name>
 | `NOTION_LOCAL_OPS_WORKSPACE_ROOT` | yes | home directory |
 | `NOTION_LOCAL_OPS_STATE_DIR` | no | `~/.notion-local-ops-mcp` |
 | `NOTION_LOCAL_OPS_AUTH_TOKEN` | no | empty |
+| `NOTION_LOCAL_OPS_AUTH_MODE` | no | `shared_token` when `AUTH_TOKEN` is set, otherwise `none` |
+| `NOTION_LOCAL_OPS_PUBLIC_BASE_URL` | required for OAuth | empty |
+| `NOTION_LOCAL_OPS_OAUTH_LOGIN_TOKEN` | no | falls back to `AUTH_TOKEN` |
+| `NOTION_LOCAL_OPS_OAUTH_SCOPES` | no | `local-ops` |
+| `NOTION_LOCAL_OPS_OAUTH_TOKEN_TTL_SECONDS` | no | `86400` |
 | `NOTION_LOCAL_OPS_CLOUDFLARED_CONFIG` | no | empty |
 | `NOTION_LOCAL_OPS_TUNNEL_NAME` | no | empty |
 | `NOTION_LOCAL_OPS_CODEX_COMMAND` | no | `codex` |

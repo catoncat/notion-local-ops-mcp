@@ -11,6 +11,7 @@ from .http_compat import build_http_compat_app
 
 from .config import (
     APP_NAME,
+    AUTH_MODE,
     AUTH_TOKEN,
     CLAUDE_COMMAND,
     CODEX_COMMAND,
@@ -19,7 +20,11 @@ from .config import (
     DELEGATE_TIMEOUT,
     GRACEFUL_SHUTDOWN_SECONDS,
     HOST,
+    OAUTH_LOGIN_TOKEN,
+    OAUTH_SCOPES,
+    OAUTH_TOKEN_TTL_SECONDS,
     PORT,
+    PUBLIC_BASE_URL,
     STATE_DIR,
     WORKSPACE_ROOT,
     ensure_runtime_directories,
@@ -35,6 +40,7 @@ from .gitops import git_diff as git_diff_impl
 from .gitops import git_log as git_log_impl
 from .gitops import git_show as git_show_impl
 from .gitops import git_status as git_status_impl
+from .oauth import OAuthRuntimeConfig
 from .patching import apply_patch as apply_patch_impl
 from . import session
 from .pathing import resolve_cwd, resolve_path
@@ -74,6 +80,18 @@ def _current_auth_token() -> str:
     # Resolved via module globals so tests that monkeypatch ``AUTH_TOKEN`` on
     # this module (and runtime overrides) are honored per-request.
     return globals().get("AUTH_TOKEN", "") or ""
+
+
+def _current_oauth_config() -> OAuthRuntimeConfig:
+    return OAuthRuntimeConfig(
+        auth_mode=globals().get("AUTH_MODE", "") or "",
+        auth_token=_current_auth_token(),
+        public_base_url=globals().get("PUBLIC_BASE_URL", "") or "",
+        state_dir=globals().get("STATE_DIR", STATE_DIR),
+        oauth_login_token=globals().get("OAUTH_LOGIN_TOKEN", "") or "",
+        oauth_scopes=tuple(globals().get("OAUTH_SCOPES", ("local-ops",)) or ("local-ops",)),
+        oauth_token_ttl_seconds=int(globals().get("OAUTH_TOKEN_TTL_SECONDS", 86400) or 86400),
+    )
 
 
 def _current_debug_mcp_logging() -> bool:
@@ -391,7 +409,7 @@ async def server_info() -> dict[str, object]:
         "state_dir": str(STATE_DIR),
         "command_timeout_seconds": COMMAND_TIMEOUT,
         "delegate_timeout_seconds": DELEGATE_TIMEOUT,
-        "auth": "bearer" if AUTH_TOKEN else "none",
+        "auth": _current_oauth_config().normalized_auth_mode,
         "debug_mcp_logging": bool(DEBUG_MCP_LOGGING),
         "codex_command": CODEX_COMMAND,
         "claude_command": CLAUDE_COMMAND,
@@ -757,6 +775,7 @@ def build_http_app():
         app_name=APP_NAME,
         mcp_path="/mcp",
         get_auth_token=_current_auth_token,
+        get_oauth_config=_current_oauth_config,
         get_debug_enabled=_current_debug_mcp_logging,
         instructions=MCP_INSTRUCTIONS,
     )
