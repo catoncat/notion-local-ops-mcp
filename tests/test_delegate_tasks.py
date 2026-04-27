@@ -1,3 +1,4 @@
+import threading
 import time
 from pathlib import Path
 
@@ -5,14 +6,15 @@ import pytest
 import notion_local_ops_mcp.executors as executors
 from notion_local_ops_mcp.executors import ExecutorRegistry, Invocation
 from notion_local_ops_mcp.tasks import TaskStore
+from tests.helpers import python_json_cmd, python_print_cmd, python_sleep_cmd
 
 
 def test_executor_registry_prefers_codex_when_present(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "state")
     registry = ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"print('codex')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
     )
 
     task = registry.submit(task="say hi", executor="auto", cwd=tmp_path, timeout=5)
@@ -34,8 +36,8 @@ def test_submitted_task_eventually_succeeds(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "state")
     registry = ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"print('done')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_print_cmd("done"),
+        claude_command=python_print_cmd("claude"),
     )
 
     task = registry.submit(task="finish", executor="codex", cwd=tmp_path, timeout=5)
@@ -55,8 +57,8 @@ def test_cancel_marks_long_running_task_cancelled(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "state")
     registry = ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"import time; time.sleep(2)\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_sleep_cmd(2),
+        claude_command=python_print_cmd("claude"),
     )
 
     task = registry.submit(task="cancel", executor="codex", cwd=tmp_path, timeout=5)
@@ -72,8 +74,8 @@ def test_wait_returns_completed_task_metadata(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "state")
     registry = ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"print('done')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_print_cmd("done"),
+        claude_command=python_print_cmd("claude"),
     )
 
     task = registry.submit(task="finish", executor="codex", cwd=tmp_path, timeout=5)
@@ -88,12 +90,12 @@ def test_submit_command_runs_shell_task_in_background(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "state")
     registry = ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"print('codex')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
     )
 
     task = registry.submit_command(
-        command="python3 -c \"print('shell')\"",
+        command=python_print_cmd("shell"),
         cwd=tmp_path,
         timeout=5,
     )
@@ -109,12 +111,12 @@ def test_cancel_marks_background_command_cancelled(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "state")
     registry = ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"print('codex')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
     )
 
     task = registry.submit_command(
-        command="python3 -c \"import time; time.sleep(2)\"",
+        command=python_sleep_cmd(2),
         cwd=tmp_path,
         timeout=5,
     )
@@ -131,8 +133,8 @@ def test_submit_persists_structured_delegate_metadata(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "state")
     registry = ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"print('codex')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
     )
 
     task = registry.submit(
@@ -158,8 +160,8 @@ def test_build_prompt_includes_structured_delegate_sections(tmp_path: Path) -> N
     store = TaskStore(tmp_path / "state")
     registry = ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"print('codex')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
     )
 
     prompt = registry._build_prompt(
@@ -253,19 +255,37 @@ def test_run_task_decodes_utf8_process_output(tmp_path: Path, monkeypatch) -> No
 
     popen_kwargs: dict[str, object] = {}
 
+    class FakeStream:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+            self._read = False
+
+        def read(self, n: int = -1) -> bytes:
+            if self._read:
+                return b""
+            self._read = True
+            return self._data
+
     class FakeProcess:
         def __init__(self, *args, **kwargs) -> None:
             popen_kwargs.update(kwargs)
             self.returncode = 0
+            self.pid = 12345
+            self.stdout = FakeStream(b"done \xe2\x98\x83\xff")
+            self.stderr = FakeStream(b"warn \xff")
+            self._polled = False
 
         def poll(self):
-            return None
-
-        def communicate(self, timeout=None):
-            return (b"done \xe2\x98\x83\xff", b"warn \xff")
+            if not self._polled:
+                self._polled = True
+                return None
+            return 0
 
         def kill(self) -> None:
             return None
+
+        def wait(self, timeout=None) -> int:
+            return 0
 
     monkeypatch.setattr(executors.subprocess, "Popen", FakeProcess)
 
@@ -292,12 +312,79 @@ def test_run_task_decodes_utf8_process_output(tmp_path: Path, monkeypatch) -> No
     assert store.read_stderr(task["task_id"]) == "warn \ufffd"
 
 
+def test_delegate_popen_oserror_marks_failed(tmp_path: Path, monkeypatch) -> None:
+    """If subprocess.Popen raises OSError in the delegate path, the task
+    should be marked failed with the error in stderr, not stuck at running."""
+    store = TaskStore(tmp_path / "state")
+    registry = ExecutorRegistry(
+        store=store,
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
+    )
+
+    # Monkeypatch Popen to raise OSError so the delegate path hits it
+    monkeypatch.setattr(
+        executors.subprocess,
+        "Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("No such executable")),
+    )
+
+    task = registry.submit(task="will fail", executor="codex", cwd=tmp_path, timeout=5)
+    task_id = task["task_id"]
+
+    result = registry.wait(task_id, timeout=5, poll_interval=0.05)
+    assert result["status"] == "failed"
+
+
+def test_delegate_popen_oserror_writes_error_to_logs(tmp_path: Path, monkeypatch) -> None:
+    """When Popen raises OSError, the exception message should appear in
+    stderr and summary."""
+    store = TaskStore(tmp_path / "state")
+    registry = ExecutorRegistry(
+        store=store,
+        codex_command=python_print_cmd("codex"),
+        claude_command=python_print_cmd("claude"),
+    )
+
+    # Monkeypatch Popen to raise OSError
+    monkeypatch.setattr(
+        executors.subprocess,
+        "Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("No such executable")),
+    )
+
+    # Create a task and run it directly (bypass submit's thread for simplicity)
+    task = store.create(task="oserror test", executor="codex", cwd=str(tmp_path), timeout=5)
+    cancel_event = threading.Event()
+
+    registry._run_task(
+        task_id=task["task_id"],
+        executor_name="codex",
+        command="codex",
+        task="oserror test",
+        goal=None,
+        cwd=tmp_path,
+        timeout=5,
+        cancel_event=cancel_event,
+        context_files=[],
+        acceptance_criteria=[],
+        verification_commands=[],
+        commit_mode="allowed",
+        output_schema=None,
+        parse_structured_output=True,
+    )
+
+    meta = store.get(task["task_id"])
+    assert meta["status"] == "failed"
+    assert "No such executable" in store.read_stderr(task["task_id"])
+
+
 def test_delegate_task_extracts_structured_json_output(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "state")
     registry = ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"print('{\\\"ok\\\": true}')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_json_cmd({"ok": True}),
+        claude_command=python_print_cmd("claude"),
     )
 
     task = registry.submit(

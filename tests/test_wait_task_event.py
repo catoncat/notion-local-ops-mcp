@@ -6,14 +6,15 @@ from pathlib import Path
 
 from notion_local_ops_mcp.executors import ExecutorRegistry
 from notion_local_ops_mcp.tasks import TaskStore
+from tests.helpers import python_print_cmd, python_sleep_cmd
 
 
 def _registry(tmp_path: Path) -> ExecutorRegistry:
     store = TaskStore(tmp_path / "state")
     return ExecutorRegistry(
         store=store,
-        codex_command="python3 -c \"print('done')\"",
-        claude_command="python3 -c \"print('claude')\"",
+        codex_command=python_print_cmd("done"),
+        claude_command=python_print_cmd("claude"),
     )
 
 
@@ -23,7 +24,7 @@ def test_wait_returns_quickly_via_completion_event(tmp_path: Path) -> None:
     # take at least half a second.
     registry = _registry(tmp_path)
     submitted = registry.submit_command(
-        command="python3 -c 'import time; time.sleep(0.05)'",
+        command=python_sleep_cmd(0.05),
         cwd=tmp_path,
         timeout=10,
     )
@@ -41,7 +42,7 @@ def test_wait_returns_quickly_via_completion_event(tmp_path: Path) -> None:
 def test_wait_times_out_when_task_still_running(tmp_path: Path) -> None:
     registry = _registry(tmp_path)
     submitted = registry.submit_command(
-        command="python3 -c 'import time; time.sleep(2)'",
+        command=python_sleep_cmd(2),
         cwd=tmp_path,
         timeout=10,
     )
@@ -59,7 +60,7 @@ def test_wait_times_out_when_task_still_running(tmp_path: Path) -> None:
 def test_wait_fast_path_when_task_already_completed(tmp_path: Path) -> None:
     registry = _registry(tmp_path)
     submitted = registry.submit_command(
-        command="python3 -c 'print(1)'",
+        command=python_print_cmd("1"),
         cwd=tmp_path,
         timeout=10,
     )
@@ -99,7 +100,7 @@ def test_wait_falls_back_to_polling_when_event_missing(tmp_path: Path) -> None:
 def test_cancel_wakes_waiters(tmp_path: Path) -> None:
     registry = _registry(tmp_path)
     submitted = registry.submit_command(
-        command="python3 -c 'import time; time.sleep(10)'",
+        command=python_sleep_cmd(10),
         cwd=tmp_path,
         timeout=30,
     )

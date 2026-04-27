@@ -283,6 +283,10 @@ def git_commit(
         commit_args.extend(["--author", author])
     if sign_off:
         commit_args.append("--signoff")
+    # When specific paths are staged (not stage_all), restrict the commit
+    # to only those paths so unrelated staged files are not committed.
+    if normalized_paths and not stage_all and not amend:
+        commit_args.extend(["--", *normalized_paths])
 
     if dry_run:
         return {
@@ -309,16 +313,13 @@ def git_commit(
 
     head_result = _run_git(["rev-parse", "HEAD"], cwd=cwd)
     commit_hash = head_result.stdout.strip()
-    # For amend, re-read the resulting staged file list so callers see what is
-    # actually in the new commit.
-    if amend:
-        changed = _run_git(
-            ["show", "--name-only", "--pretty=format:", commit_hash],
-            cwd=cwd,
-        )
-        committed_files = [line for line in changed.stdout.splitlines() if line]
-    else:
-        committed_files = staged_files
+    # Re-read the actual committed files from HEAD so callers see what was
+    # truly committed (important when pathspec restricts the commit).
+    changed = _run_git(
+        ["show", "--name-only", "--pretty=format:", commit_hash],
+        cwd=cwd,
+    )
+    committed_files = [line for line in changed.stdout.splitlines() if line]
     return {
         "success": True,
         "cwd": str(cwd),

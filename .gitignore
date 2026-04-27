@@ -12,3 +12,7 @@ __pycache__/
 *.egg-info/
 .DS_Store
 .wrangler/
+.state/
+tools/
+Start-Notion-Local-MCP.cmd
+启动 Notion Local MCP.cmd

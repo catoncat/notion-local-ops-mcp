@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git push *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(python -m pytest tests/ -x -q)",
+      "Bash(python -m pytest tests/test_streaming.py tests/test_delegate_tasks.py tests/test_wait_task_event.py -v --timeout=30)",
+      "Bash(python -m pytest tests/test_streaming.py tests/test_delegate_tasks.py tests/test_wait_task_event.py -v)",
+      "Bash(python -c ' *)",
+      "Bash(python -m pytest -v)",
+      "Bash(python -m pytest tests/test_streaming.py tests/test_delegate_tasks.py tests/test_shell_tools.py tests/test_git_tools.py tests/test_patch_tools.py tests/test_config.py -q)",
+      "Bash(python -m pytest tests/test_delegate_tasks.py -v)",
+      "Bash(python -m pytest tests/test_delegate_tasks.py -q)",
+      "Bash(python -m pytest -q)",
+      "Bash(python -m pytest tests/test_streaming.py tests/test_patch_tools.py tests/test_config.py tests/test_delegate_tasks.py tests/test_shell_tools.py tests/test_git_tools.py -q)",
+      "Bash(python -m pytest tests/test_windows_launchers.py -v -k \"preserves_connection_name\")",
+      "Bash(powershell.exe -NoLogo -NoProfile -Command 'try { $null = [System.Management.Automation.PSParser]::Tokenize\\(\\(Get-Content -LiteralPath '\\\\''scripts/launch-mcp-manager.ps1'\\\\'' -Raw -Encoding UTF8\\), [ref]$null\\); Write-Host '\\\\''Syntax OK'\\\\'' } catch { Write-Host $_.Exception.Message }')",
+      "Bash(powershell.exe -NoLogo -NoProfile -Command \"[System.IO.File]::ReadAllBytes\\('scripts/launch-mcp-manager.ps1'\\)[0..2] -join ','\")"
+    ]
+  }
+}

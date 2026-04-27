@@ -8,11 +8,12 @@ on:
 
 jobs:
   pytest:
-    name: pytest (py${{ matrix.python }})
-    runs-on: ubuntu-latest
+    name: pytest (py${{ matrix.python }} / ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
@@ -31,7 +32,7 @@ jobs:
       - name: Show versions
         run: |
           python --version
-          pip show fastmcp uvicorn pytest | grep -E '^(Name|Version)'
+          pip show fastmcp uvicorn pytest
 
       - name: pytest
         run: pytest -q
