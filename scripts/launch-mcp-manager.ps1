@@ -776,7 +776,12 @@ function Test-QuickTunnelEdgeFailure {
 function Wait-ForQuickTunnelUrl {
     param([string[]]$LogPaths, [int]$TimeoutSeconds = 45, [int]$ProcessId = 0)
     $script:LastQuickTunnelFailureInfo = $null
-    $quickTunnelPattern = '(https://(?!api\.)[a-z0-9-]+\.trycloudflare\.com|http://127\.0\.0\.1:\d+)'
+    $quickTunnelPattern = 'https://(?!api\.)[a-z0-9-]+\.trycloudflare\.com'
+    $localTestTunnelPattern = 'http://127\.0\.0\.1:\d+'
+    $allowLocalPublicUrlForTests = (
+        (Get-MergedConfigValue -EnvMap $envMap -Name 'NOTION_LOCAL_OPS_ALLOW_LOCAL_PUBLIC_URL_FOR_TESTS' -Default '') -eq '1' -or
+        -not [string]::IsNullOrWhiteSpace((Get-MergedConfigValue -EnvMap $envMap -Name 'FAKE_CLOUDFLARED_STATE' -Default ''))
+    )
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $combined = ''
     while ((Get-Date) -lt $deadline) {
@@ -785,7 +790,6 @@ function Wait-ForQuickTunnelUrl {
             $quickMatches = [regex]::Matches($combined, $quickTunnelPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
             if ($quickMatches.Count -gt 0) {
                 $quickUrl = $quickMatches[$quickMatches.Count - 1].Value
-                if ($quickUrl -match '^http://127\.0\.0\.1:\d+$') { return $quickUrl }
                 if (Test-QuickTunnelEdgeReady -Text $combined) { return $quickUrl }
                 if (Test-QuickTunnelEdgeFailure -Text $combined) {
                     $script:LastQuickTunnelFailureInfo = [pscustomobject]@{
@@ -796,6 +800,10 @@ function Wait-ForQuickTunnelUrl {
                     }
                     break
                 }
+            }
+            elseif ($allowLocalPublicUrlForTests) {
+                $localMatches = [regex]::Matches($combined, $localTestTunnelPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                if ($localMatches.Count -gt 0) { return $localMatches[$localMatches.Count - 1].Value }
             }
             $failureInfo = Get-QuickTunnelFailureInfo -Text $combined
             if ($failureInfo.IsRateLimited -or ($failureInfo.IsTransient -and $combined -match 'failed to request quick Tunnel|failed to unmarshal quick Tunnel|\bEOF\b')) {
