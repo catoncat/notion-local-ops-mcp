@@ -4,6 +4,7 @@ import contextlib
 import base64
 import hashlib
 import logging
+import os
 import secrets
 import socket
 import stat
@@ -300,6 +301,10 @@ def test_oauth_store_file_permissions_are_locked_down(monkeypatch, tmp_path) -> 
     assert registration.status_code == 201
     oauth_path = tmp_path / "oauth.json"
     assert oauth_path.exists()
+    if os.name == "nt":
+        # Windows' stat permission bits do not reflect ACL owner-only semantics;
+        # Path.chmod(0o600) only toggles read-only and still reports 0o666.
+        return
     file_mode = stat.S_IMODE(oauth_path.stat().st_mode)
     assert file_mode == 0o600, f"oauth.json mode={oct(file_mode)} (expected 0o600)"
 

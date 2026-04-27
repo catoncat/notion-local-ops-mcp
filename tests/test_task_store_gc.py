@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -48,6 +49,13 @@ def test_task_store_creates_state_with_owner_only_permissions(tmp_path: Path) ->
     created = store.create(task="t", executor="shell", cwd=str(tmp_path))
     task_id = str(created["task_id"])
     task_dir = state_root / "tasks" / task_id
+
+    if os.name == "nt":
+        assert state_root.exists()
+        assert task_dir.exists()
+        for name in ("meta.json", "stdout.log", "stderr.log", "summary.txt"):
+            assert (task_dir / name).exists()
+        return
 
     assert stat.S_IMODE(state_root.stat().st_mode) == 0o700
     assert stat.S_IMODE(task_dir.stat().st_mode) == 0o700
