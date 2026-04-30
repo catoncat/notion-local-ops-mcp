@@ -278,21 +278,7 @@ fi
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/.venv/bin/activate"
 
-python - <<'PY'
-import sys
-
-if sys.version_info < (3, 11):
-    raise SystemExit("Python 3.11+ is required.")
-PY
-
-if ! command -v notion-local-ops-mcp >/dev/null 2>&1 || ! python - <<'PY' >/dev/null 2>&1
-import fastmcp
-import uvicorn
-import notion_local_ops_mcp.supervisor
-PY
-then
-  python -m pip install -e .
-fi
+ensure_python_runtime_deps
 
 if [[ -z "${NOTION_LOCAL_OPS_AUTH_TOKEN:-}" ]]; then
   echo "Missing NOTION_LOCAL_OPS_AUTH_TOKEN. Set it in .env or export it before running." >&2

@@ -182,6 +182,7 @@ If you also want the **Notion AI instruction page + project-management** workflo
 ## Requirements
 
 - Python 3.11+
+- FastMCP 3.x (`fastmcp>=3.2.4,<4`, installed from `pyproject.toml`)
 - `cloudflared`
 - A Notion workspace where you can configure an **MCP Agent** with custom MCP support
 - Optional: `codex` CLI
@@ -214,7 +215,7 @@ Then run:
 What you should expect:
 
 - the script creates or reuses `.venv`
-- the script installs missing Python dependencies automatically
+- the script installs missing or incompatible Python dependencies automatically
 - the script starts the local MCP server on `http://127.0.0.1:8766/mcp` through a rolling-reload supervisor
 - the script prints a `./scripts/dev-tunnel.sh reload` command so you can restart the local server without dropping the tunnel
 - the script prefers `cloudflared.local.yml` for a named tunnel
@@ -331,7 +332,9 @@ Useful commands after install:
 Update workflow:
 
 - Python/code-only changes: `./scripts/launchd-reload.sh`
-- dependency / `.venv` / env changes: `./scripts/launchd-restart.sh mcp`
+- dependency / `.venv` / env changes: rerun `./scripts/install-launchd.sh` when
+  the rendered plist or dependency constraints may be stale, otherwise use
+  `./scripts/launchd-restart.sh mcp`
 - tunnel config changes: `./scripts/launchd-restart.sh cloudflared`
 
 ### Expose With cloudflared

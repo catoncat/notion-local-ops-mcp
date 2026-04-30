@@ -120,6 +120,7 @@ Output style:
 ## 运行要求
 
 - Python 3.11+
+- FastMCP 3.x（`fastmcp>=3.2.4,<4`，由 `pyproject.toml` 安装）
 - `cloudflared`
 - 一个可在 Notion 中配置自定义 MCP 的 **MCP Agent**
 - 可选：`codex` CLI
@@ -152,7 +153,7 @@ NOTION_LOCAL_OPS_AUTH_TOKEN="replace-me"
 你应该看到：
 
 - 脚本创建或复用 `.venv`
-- 自动安装缺失的 Python 依赖
+- 自动安装缺失或版本不匹配的 Python 依赖
 - 本地 MCP 服务通过一个平滑重载 supervisor 启动在 `http://127.0.0.1:8766/mcp`
 - 脚本会打印 `./scripts/dev-tunnel.sh reload`，用于不掉 tunnel 地重载本地服务
 - 优先使用 `cloudflared.local.yml` 命名 tunnel
@@ -269,7 +270,8 @@ http://127.0.0.1:8766/mcp
 更新代码时的建议：
 
 - 仅 Python / 代码更新：`./scripts/launchd-reload.sh`
-- 依赖 / `.venv` / env 变更：`./scripts/launchd-restart.sh mcp`
+- 依赖 / `.venv` / env 变更：如果依赖约束或 plist 环境可能过期，先重跑
+  `./scripts/install-launchd.sh`；否则用 `./scripts/launchd-restart.sh mcp`
 - tunnel 配置变更：`./scripts/launchd-restart.sh cloudflared`
 
 ### 用 cloudflared 暴露服务
