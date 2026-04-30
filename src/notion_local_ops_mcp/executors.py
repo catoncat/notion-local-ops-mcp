@@ -15,7 +15,10 @@ from pathlib import PureWindowsPath
 from .tasks import TaskStore
 
 
-TERMINAL_TASK_STATUSES = {"succeeded", "failed", "cancelled"}
+# 'abandoned' is set by TaskStore.reap_stale_running_tasks() on server startup
+# for any persisted task that was still 'queued' / 'running'. Treat it as
+# terminal so wait_task / get_task don't keep polling forever.
+TERMINAL_TASK_STATUSES = {"succeeded", "failed", "cancelled", "abandoned"}
 ALLOWED_COMMIT_MODES = {"allowed", "required", "forbidden"}
 IS_WINDOWS = os.name == "nt"
 
