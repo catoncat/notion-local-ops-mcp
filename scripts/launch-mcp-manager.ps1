@@ -1,0 +1,2008 @@
+param(
+    [int]$DefaultCount = 1,
+    [int]$DefaultBasePort = 8766,
+    [int]$RequestedCount = 0,
+    [int]$RequestedBasePort = 0,
+    [switch]$NonInteractive,
+    [int]$MonitorCycles = 0,
+    [int]$MonitorIntervalSeconds = 5
+)
+
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+Add-Type -AssemblyName System.Net.Http
+try {
+    [Console]::InputEncoding = [System.Text.Encoding]::UTF8
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+}
+catch {
+}
+
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+$envMap = @{}
+$DesktopStatusPath = Join-Path ([Environment]::GetFolderPath('Desktop')) "Notion-MCP-status.txt"
+$script:PanelInputWarning = ''
+
+function Read-DotEnvFile {
+    param([string]$Path)
+
+    $result = @{}
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $result
+    }
+
+    foreach ($line in Get-Content -LiteralPath $Path -Encoding UTF8) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith('#')) {
+            continue
+        }
+
+        $eqIndex = $trimmed.IndexOf('=')
+        if ($eqIndex -lt 1) {
+            continue
+        }
+
+        $key = $trimmed.Substring(0, $eqIndex).Trim()
+        $value = $trimmed.Substring($eqIndex + 1).Trim()
+        if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+        $result[$key] = $value
+    }
+
+    return $result
+}
+
+function Get-MergedConfigValue {
+    param(
+        [hashtable]$EnvMap,
+        [string]$Name,
+        [string]$Default = ''
+    )
+
+    if (Test-Path "Env:$Name") {
+        return [string][Environment]::GetEnvironmentVariable($Name)
+    }
+    if ($EnvMap.ContainsKey($Name)) {
+        return [string]$EnvMap[$Name]
+    }
+    return $Default
+}
+
+function Get-MergedIntConfigValue {
+    param(
+        [hashtable]$EnvMap,
+        [string]$Name,
+        [int]$Default
+    )
+
+    $raw = Get-MergedConfigValue -EnvMap $EnvMap -Name $Name -Default ([string]$Default)
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return $Default
+    }
+
+    $parsed = 0
+    if ([int]::TryParse($raw, [ref]$parsed)) {
+        return $parsed
+    }
+
+    throw "Invalid integer value for ${Name}: $raw"
+}
+
+function Normalize-ExistingPath {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return ''
+    }
+
+    try {
+        if (Test-Path -LiteralPath $Path) {
+            return (Resolve-Path -LiteralPath $Path).Path
+        }
+    }
+    catch {
+    }
+
+    return [System.IO.Path]::GetFullPath($Path)
+}
+
+function Ensure-ParentDirectory {
+    param([string]$Path)
+
+    $parent = Split-Path -Parent $Path
+    if (-not [string]::IsNullOrWhiteSpace($parent)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
+}
+
+function Write-TextFileAtomically {
+    param(
+        [string]$Path,
+        [string]$Value
+    )
+
+    Ensure-ParentDirectory -Path $Path
+
+    $directory = Split-Path -Parent $Path
+    $leaf = Split-Path -Leaf $Path
+    $tempPath = Join-Path $directory (".{0}.{1}.{2}.tmp" -f $leaf, $PID, ([guid]::NewGuid().ToString('N')))
+    $backupPath = Join-Path $directory (".{0}.{1}.{2}.bak" -f $leaf, $PID, ([guid]::NewGuid().ToString('N')))
+
+    try {
+        Set-Content -LiteralPath $tempPath -Value $Value -Encoding UTF8
+        $written = $false
+        for ($attempt = 1; $attempt -le 20; $attempt++) {
+            try {
+                if (Test-Path -LiteralPath $Path) {
+                    [System.IO.File]::Replace($tempPath, $Path, $backupPath)
+                    if (Test-Path -LiteralPath $backupPath) {
+                        Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                else {
+                    Move-Item -LiteralPath $tempPath -Destination $Path -Force
+                }
+                $written = $true
+                break
+            }
+            catch {
+                if ($attempt -eq 20) {
+                    throw
+                }
+                Start-Sleep -Milliseconds 50
+            }
+        }
+
+        if (-not $written) {
+            throw "Failed to write file atomically: $Path"
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempPath) {
+            Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $backupPath) {
+            Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Read-IntWithDefault {
+    param(
+        [string]$Prompt,
+        [int]$Default
+    )
+
+    while ($true) {
+        $raw = Read-Host "$Prompt [$Default]"
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            return $Default
+        }
+
+        $parsed = 0
+        if ([int]::TryParse($raw, [ref]$parsed) -and $parsed -gt 0) {
+            return $parsed
+        }
+
+        Write-Host "Please enter an integer greater than 0." -ForegroundColor Yellow
+    }
+}
+
+function Test-PortAvailable {
+    param([int]$Port)
+
+    $listener = $null
+    try {
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+        $listener.Start()
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($null -ne $listener) {
+            try { $listener.Stop() } catch {}
+        }
+    }
+}
+
+function Test-PortListening {
+    param(
+        [string]$BindHost,
+        [int]$Port,
+        [int]$TimeoutMs = 400
+    )
+
+    $client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $async = $client.BeginConnect($BindHost, $Port, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs)) {
+            return $false
+        }
+        $client.EndConnect($async)
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        try { $client.Close() } catch {}
+    }
+}
+
+function Wait-ForPort {
+    param(
+        [string]$BindHost,
+        [int]$Port,
+        [int]$TimeoutSeconds = 20
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-PortListening -BindHost $BindHost -Port $Port -TimeoutMs 500) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 250
+    }
+
+    return $false
+}
+
+function Wait-ForProcessExit {
+    param(
+        [int]$ProcessId,
+        [int]$TimeoutSeconds = 8
+    )
+
+    if ($ProcessId -le 0) {
+        return $true
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Test-ProcessAlive -ProcessId $ProcessId)) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 250
+    }
+
+    return (-not (Test-ProcessAlive -ProcessId $ProcessId))
+}
+
+function Reset-LogFile {
+    param(
+        [string]$Path,
+        [int]$TimeoutSeconds = 8
+    )
+
+    Ensure-ParentDirectory -Path $Path
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $lastError = ''
+    while ((Get-Date) -lt $deadline) {
+        try {
+            [System.IO.File]::WriteAllText($Path, '', [System.Text.Encoding]::UTF8)
+            return
+        }
+        catch {
+            $lastError = $_.Exception.Message
+            Start-Sleep -Milliseconds 250
+        }
+    }
+
+    Write-Host "[WARN] Unable to reset log file ${Path}; continuing with append-only log. Last error: $lastError" -ForegroundColor Yellow
+}
+
+function Get-FreePorts {
+    param(
+        [int]$Count,
+        [int]$StartingPort
+    )
+
+    $ports = New-Object System.Collections.Generic.List[int]
+    $port = $StartingPort
+    while ($ports.Count -lt $Count) {
+        if (Test-PortAvailable -Port $port) {
+            $ports.Add($port)
+        }
+        $port += 1
+    }
+    return @($ports.ToArray())
+}
+
+function Resolve-CloudflaredExecutable {
+    param([string]$PreferredCommand = '')
+
+    if (-not [string]::IsNullOrWhiteSpace($PreferredCommand)) {
+        if (Test-Path -LiteralPath $PreferredCommand) {
+            return (Resolve-Path -LiteralPath $PreferredCommand).Path
+        }
+
+        $overrideCommand = Get-Command $PreferredCommand -ErrorAction SilentlyContinue
+        if ($null -ne $overrideCommand) {
+            return $overrideCommand.Source
+        }
+    }
+
+    $command = Get-Command 'cloudflared' -ErrorAction SilentlyContinue
+    if ($null -ne $command) {
+        return $command.Source
+    }
+
+    $localBinary = Join-Path $RepoRoot "tools\cloudflared.exe"
+    if (Test-Path -LiteralPath $localBinary) {
+        return (Resolve-Path -LiteralPath $localBinary).Path
+    }
+
+    throw "Missing required command: cloudflared. Install it on PATH or set NOTION_LOCAL_OPS_CLOUDFLARED_COMMAND."
+}
+
+function Resolve-ServerPaths {
+    $pythonPath = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+    $entrypointPath = Join-Path $RepoRoot ".venv\Scripts\notion-local-ops-mcp.exe"
+
+    return [pscustomobject]@{
+        PythonPath = $pythonPath
+        EntryPointPath = $entrypointPath
+    }
+}
+
+function Test-LauncherRuntime {
+    param([string]$RepoRoot)
+
+    $paths = Resolve-ServerPaths
+    $pythonPath = $paths.PythonPath
+    $entrypointPath = $paths.EntryPointPath
+    $repairCommand = '.\.venv\Scripts\python.exe -m pip install -e ".[dev]"'
+
+    if (-not (Test-Path -LiteralPath $pythonPath)) {
+        throw "Missing Python runtime: $pythonPath`nRun from repo root: $repairCommand"
+    }
+
+    if (-not (Test-Path -LiteralPath $entrypointPath)) {
+        throw "Missing launcher entrypoint: $entrypointPath`nRun from repo root: $repairCommand"
+    }
+
+    $pyprojectPath = Join-Path $RepoRoot 'pyproject.toml'
+    if (-not (Test-Path -LiteralPath $pyprojectPath)) {
+        throw "Missing pyproject.toml: $pyprojectPath"
+    }
+
+    $pythonScript = @'
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import sys
+from importlib.metadata import PackageNotFoundError, metadata, version
+
+repo_root = pathlib.Path(sys.argv[1])
+pyproject_path = repo_root / "pyproject.toml"
+payload = {
+    "success": False,
+    "supported_spec": "",
+    "fastmcp_version": "",
+    "uvicorn_version": "",
+    "error": "",
+}
+
+
+def fail(message: str) -> None:
+    payload["error"] = message
+    print(json.dumps(payload))
+    raise SystemExit(0)
+
+
+try:
+    import tomllib
+    from packaging.requirements import Requirement
+except Exception as exc:
+    fail(f"failed to import runtime validation helpers: {exc}")
+
+try:
+    project = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+except Exception as exc:  # pragma: no cover
+    fail(f"failed to read pyproject.toml: {exc}")
+
+dependencies = project.get("project", {}).get("dependencies", [])
+fastmcp_req = None
+for item in dependencies:
+    req = Requirement(item)
+    if req.name.lower() == "fastmcp":
+        fastmcp_req = req
+        break
+
+if fastmcp_req is None:
+    fail("pyproject.toml does not declare a fastmcp runtime dependency")
+
+payload["supported_spec"] = str(fastmcp_req)
+
+try:
+    import fastmcp  # noqa: F401
+    import uvicorn  # noqa: F401
+except Exception as exc:
+    fail(f"failed to import runtime dependencies: {exc}")
+
+try:
+    fastmcp_version = os.environ.get("NOTION_LOCAL_OPS_TEST_FORCE_FASTMCP_VERSION") or version("fastmcp")
+    uvicorn_version = version("uvicorn")
+except PackageNotFoundError as exc:
+    fail(f"failed to read runtime package metadata: {exc}")
+
+payload["fastmcp_version"] = fastmcp_version
+payload["uvicorn_version"] = uvicorn_version
+
+if fastmcp_version not in fastmcp_req.specifier:
+    fail(f"fastmcp {fastmcp_version} is outside supported range {fastmcp_req}")
+
+forced_metadata_spec = os.environ.get("NOTION_LOCAL_OPS_TEST_FORCE_FASTMCP_METADATA_SPEC")
+if forced_metadata_spec:
+    metadata_fastmcp_reqs = [Requirement(f"fastmcp{forced_metadata_spec}")]
+else:
+    try:
+        project_metadata = metadata("notion-local-ops-mcp")
+    except PackageNotFoundError as exc:
+        fail(f"notion-local-ops-mcp is not installed: {exc}")
+
+    runtime_reqs = project_metadata.get_all("Requires-Dist") or []
+    metadata_fastmcp_reqs = [
+        Requirement(item)
+        for item in runtime_reqs
+        if Requirement(item).name.lower() == "fastmcp"
+    ]
+
+expected_parts = set(str(fastmcp_req.specifier).split(","))
+metadata_parts = [
+    set(str(item.specifier).split(","))
+    for item in metadata_fastmcp_reqs
+]
+if expected_parts and expected_parts not in metadata_parts:
+    actual = ", ".join(str(item.specifier) for item in metadata_fastmcp_reqs) or "<missing>"
+    fail(f"installed editable metadata has stale fastmcp requirement: {actual}")
+
+payload["success"] = True
+print(json.dumps(payload))
+'@
+
+    $tempScript = [System.IO.Path]::GetTempFileName() + '.py'
+    try {
+        Set-Content -LiteralPath $tempScript -Value $pythonScript -Encoding UTF8
+        $output = & $pythonPath $tempScript $RepoRoot
+        if ($LASTEXITCODE -ne 0) {
+            throw "Runtime validation failed to execute.`nRun from repo root: $repairCommand"
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempScript) {
+            Remove-Item -LiteralPath $tempScript -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    try {
+        $result = $output | ConvertFrom-Json
+    }
+    catch {
+        throw "Runtime validation returned invalid output: $output`nRun from repo root: $repairCommand"
+    }
+
+    if (-not $result.success) {
+        $message = [string]$result.error
+        if ([string]::IsNullOrWhiteSpace($message)) {
+            $message = 'unknown runtime validation failure'
+        }
+        throw "$message`nRun from repo root: $repairCommand"
+    }
+
+    return [pscustomobject]@{
+        PythonPath = $pythonPath
+        EntryPointPath = $entrypointPath
+        FastMcpVersion = [string]$result.fastmcp_version
+        UvicornVersion = [string]$result.uvicorn_version
+        SupportedSpec = [string]$result.supported_spec
+    }
+}
+
+function Test-ProcessAlive {
+    param([int]$ProcessId)
+
+    if ($ProcessId -le 0) {
+        return $false
+    }
+
+    return $null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
+}
+
+function Stop-ManagedProcess {
+    param([int]$ProcessId)
+
+    if ($ProcessId -le 0) {
+        return
+    }
+
+    if (Test-ProcessAlive -ProcessId $ProcessId) {
+        try {
+            & taskkill.exe /PID $ProcessId /T /F | Out-Null
+        }
+        catch {
+        }
+
+        if (-not (Wait-ForProcessExit -ProcessId $ProcessId -TimeoutSeconds 8)) {
+            try {
+                Stop-Process -Id $ProcessId -Force -ErrorAction Stop
+            }
+            catch {
+            }
+            [void](Wait-ForProcessExit -ProcessId $ProcessId -TimeoutSeconds 2)
+        }
+    }
+}
+
+function Stop-ManagedInstances {
+    param([object[]]$Instances)
+
+    foreach ($instance in @($Instances)) {
+        Stop-ManagedProcess -ProcessId ([int]$instance.CloudflaredProcessId)
+        Stop-ManagedProcess -ProcessId ([int]$instance.ServerProcessId)
+    }
+
+    Start-Sleep -Milliseconds 500
+}
+
+function Get-OptionalPropertyValue {
+    param(
+        [object]$Object,
+        [string]$Name,
+        $Default = $null
+    )
+
+    if ($null -eq $Object) {
+        return $Default
+    }
+
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $Default
+    }
+    if ($null -eq $property.Value) {
+        return $Default
+    }
+    return $property.Value
+}
+
+function Convert-StateInstance {
+    param([object]$Item)
+
+    $publicUrl = [string](Get-OptionalPropertyValue -Object $Item -Name 'public_url' -Default '')
+    $publicMcpUrl = [string](Get-OptionalPropertyValue -Object $Item -Name 'public_mcp_url' -Default '')
+    if ([string]::IsNullOrWhiteSpace($publicMcpUrl)) {
+        $publicMcpUrl = [string](Get-OptionalPropertyValue -Object $Item -Name 'mcp_url' -Default '')
+    }
+    if ([string]::IsNullOrWhiteSpace($publicUrl) -and -not [string]::IsNullOrWhiteSpace($publicMcpUrl)) {
+        $publicUrl = $publicMcpUrl -replace '/mcp/?$', ''
+    }
+
+    return [pscustomobject]@{
+        Name = [string](Get-OptionalPropertyValue -Object $Item -Name 'name' -Default '')
+        Host = [string](Get-OptionalPropertyValue -Object $Item -Name 'host' -Default '127.0.0.1')
+        Port = [int](Get-OptionalPropertyValue -Object $Item -Name 'port' -Default 0)
+        Token = [string](Get-OptionalPropertyValue -Object $Item -Name 'token' -Default '')
+        LocalUrl = [string](Get-OptionalPropertyValue -Object $Item -Name 'local_url' -Default '')
+        PublicUrl = $publicUrl
+        PublicMcpUrl = $publicMcpUrl
+        ServerProcessId = [int](Get-OptionalPropertyValue -Object $Item -Name 'server_pid' -Default 0)
+        CloudflaredProcessId = [int](Get-OptionalPropertyValue -Object $Item -Name 'cloudflared_pid' -Default 0)
+        StateDir = [string](Get-OptionalPropertyValue -Object $Item -Name 'state_dir' -Default '')
+        InstanceDir = [string](Get-OptionalPropertyValue -Object $Item -Name 'instance_dir' -Default '')
+        ServerLogPath = [string](Get-OptionalPropertyValue -Object $Item -Name 'server_log_path' -Default (Get-OptionalPropertyValue -Object $Item -Name 'server_stdout_log' -Default ''))
+        CloudflaredStdoutLogPath = [string](Get-OptionalPropertyValue -Object $Item -Name 'cloudflared_stdout_log_path' -Default (Get-OptionalPropertyValue -Object $Item -Name 'cloudflared_stdout_log' -Default ''))
+        CloudflaredStderrLogPath = [string](Get-OptionalPropertyValue -Object $Item -Name 'cloudflared_stderr_log_path' -Default (Get-OptionalPropertyValue -Object $Item -Name 'cloudflared_stderr_log' -Default ''))
+        StartedAt = [string](Get-OptionalPropertyValue -Object $Item -Name 'started_at' -Default '')
+        RestartCount = [int](Get-OptionalPropertyValue -Object $Item -Name 'restart_count' -Default 0)
+        LastFailureReason = [string](Get-OptionalPropertyValue -Object $Item -Name 'last_failure_reason' -Default '')
+        LastProbeAt = [string](Get-OptionalPropertyValue -Object $Item -Name 'last_probe_at' -Default '')
+        TunnelMode = [string](Get-OptionalPropertyValue -Object $Item -Name 'tunnel_mode' -Default 'quick')
+        ConsecutivePublicProbeFailures = [int](Get-OptionalPropertyValue -Object $Item -Name 'consecutive_public_probe_failures' -Default 0)
+        ConsecutiveRepairFailures = [int](Get-OptionalPropertyValue -Object $Item -Name 'consecutive_repair_failures' -Default 0)
+        NeedsNotionUrlUpdate = [bool](Get-OptionalPropertyValue -Object $Item -Name 'needs_notion_url_update' -Default $false)
+        UrlChangedAt = [string](Get-OptionalPropertyValue -Object $Item -Name 'url_changed_at' -Default '')
+        LastPublicProbeStatus = [string](Get-OptionalPropertyValue -Object $Item -Name 'last_public_probe_status' -Default 'unknown')
+        LastPublicProbeMessage = [string](Get-OptionalPropertyValue -Object $Item -Name 'last_public_probe_message' -Default '')
+        LastRepairAction = [string](Get-OptionalPropertyValue -Object $Item -Name 'last_repair_action' -Default '')
+        ProbeWarmupCyclesRemaining = [int](Get-OptionalPropertyValue -Object $Item -Name 'probe_warmup_cycles_remaining' -Default 0)
+        ConsecutiveTunnelStartFailures = [int](Get-OptionalPropertyValue -Object $Item -Name 'consecutive_tunnel_start_failures' -Default 0)
+        LastTunnelStartAttemptAt = [string](Get-OptionalPropertyValue -Object $Item -Name 'last_tunnel_start_attempt_at' -Default '')
+        NextTunnelStartAttemptAt = [string](Get-OptionalPropertyValue -Object $Item -Name 'next_tunnel_start_attempt_at' -Default '')
+    }
+}
+
+function Read-LauncherState {
+    param([string]$LauncherStatePath)
+
+    if (-not (Test-Path -LiteralPath $LauncherStatePath)) {
+        return $null
+    }
+
+    try {
+        return Get-Content -LiteralPath $LauncherStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
+    catch {
+        return $null
+    }
+}
+
+function Remove-LauncherState {
+    param([string]$LauncherStatePath)
+
+    if (Test-Path -LiteralPath $LauncherStatePath) {
+        Remove-Item -LiteralPath $LauncherStatePath -Force
+    }
+}
+
+function Write-LauncherState {
+    param(
+        [string]$LauncherStatePath,
+        [object[]]$Instances,
+        [int]$RequestedCount,
+        [int]$RequestedBasePort,
+        [string]$BindHost,
+        [string]$WorkspaceRoot
+    )
+
+    $payload = [ordered]@{
+        launcher_version = 2
+        started_at = (Get-Date).ToString('o')
+        requested_count = $RequestedCount
+        requested_base_port = $RequestedBasePort
+        bind_host = $BindHost
+        workspace_root = $WorkspaceRoot
+        instances = @(
+            @($Instances) | ForEach-Object {
+                [ordered]@{
+                    name = $_.Name
+                    host = $_.Host
+                    port = $_.Port
+                    token = $_.Token
+                    local_url = $_.LocalUrl
+                    public_url = $_.PublicUrl
+                    public_mcp_url = $_.PublicMcpUrl
+                    mcp_url = $_.PublicMcpUrl
+                    server_pid = $_.ServerProcessId
+                    cloudflared_pid = $_.CloudflaredProcessId
+                    state_dir = $_.StateDir
+                    instance_dir = $_.InstanceDir
+                    server_log_path = $_.ServerLogPath
+                    cloudflared_stdout_log_path = $_.CloudflaredStdoutLogPath
+                    cloudflared_stderr_log_path = $_.CloudflaredStderrLogPath
+                    started_at = $_.StartedAt
+                    restart_count = $_.RestartCount
+                    last_failure_reason = $_.LastFailureReason
+                    last_probe_at = $_.LastProbeAt
+                    tunnel_mode = $_.TunnelMode
+                    consecutive_public_probe_failures = $_.ConsecutivePublicProbeFailures
+                    consecutive_repair_failures = $_.ConsecutiveRepairFailures
+                    needs_notion_url_update = $_.NeedsNotionUrlUpdate
+                    url_changed_at = $_.UrlChangedAt
+                    last_public_probe_status = $_.LastPublicProbeStatus
+                    last_public_probe_message = $_.LastPublicProbeMessage
+                    last_repair_action = $_.LastRepairAction
+                    probe_warmup_cycles_remaining = $_.ProbeWarmupCyclesRemaining
+                    consecutive_tunnel_start_failures = $_.ConsecutiveTunnelStartFailures
+                    last_tunnel_start_attempt_at = $_.LastTunnelStartAttemptAt
+                    next_tunnel_start_attempt_at = $_.NextTunnelStartAttemptAt
+                }
+            }
+        )
+    }
+
+    Write-TextFileAtomically -Path $LauncherStatePath -Value ($payload | ConvertTo-Json -Depth 6)
+}
+
+function Convert-LauncherStateToInstances {
+    param([object]$State)
+
+    if ($null -eq $State) {
+        return @()
+    }
+
+    return @(@($State.instances) | ForEach-Object { Convert-StateInstance -Item $_ })
+}
+
+function Test-InstanceHealthyForReuse {
+    param([pscustomobject]$Instance)
+
+    if (-not (Test-ProcessAlive -ProcessId ([int]$Instance.ServerProcessId))) {
+        return $false
+    }
+    if (-not (Test-ProcessAlive -ProcessId ([int]$Instance.CloudflaredProcessId))) {
+        return $false
+    }
+    if (-not (Test-PortListening -BindHost $Instance.Host -Port $Instance.Port -TimeoutMs 500)) {
+        return $false
+    }
+    if ([string]::IsNullOrWhiteSpace($Instance.PublicUrl) -or [string]::IsNullOrWhiteSpace($Instance.PublicMcpUrl)) {
+        return $false
+    }
+
+    return $true
+}
+
+function Test-LauncherStateHealthy {
+    param([object]$State)
+
+    $instances = Convert-LauncherStateToInstances -State $State
+    if ($instances.Count -eq 0) {
+        return $false
+    }
+
+    foreach ($instance in $instances) {
+        if (-not (Test-InstanceHealthyForReuse -Instance $instance)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-LauncherStateMatchesRequest {
+    param(
+        [object]$State,
+        [int]$RequestedCount,
+        [int]$RequestedBasePort,
+        [string]$BindHost,
+        [string]$WorkspaceRoot
+    )
+
+    if ($null -eq $State) {
+        return $false
+    }
+
+    $stateCount = [int](Get-OptionalPropertyValue -Object $State -Name 'requested_count' -Default (@($State.instances).Count))
+    $stateBasePort = [int](Get-OptionalPropertyValue -Object $State -Name 'requested_base_port' -Default ([int](Get-OptionalPropertyValue -Object $State.instances[0] -Name 'port' -Default 0)))
+    $stateBindHost = [string](Get-OptionalPropertyValue -Object $State -Name 'bind_host' -Default '')
+    $stateWorkspaceRoot = [string](Get-OptionalPropertyValue -Object $State -Name 'workspace_root' -Default '')
+
+    if ($stateCount -ne $RequestedCount) {
+        return $false
+    }
+    if ($stateBasePort -ne $RequestedBasePort) {
+        return $false
+    }
+    if ($stateBindHost -ne $BindHost) {
+        return $false
+    }
+    if ((Normalize-ExistingPath -Path $stateWorkspaceRoot) -ne (Normalize-ExistingPath -Path $WorkspaceRoot)) {
+        return $false
+    }
+
+    return $true
+}
+
+function Get-QuickTunnelFailureInfo {
+    param([string]$Text)
+
+    $message = 'quick tunnel URL not found'
+    $isRateLimited = $false
+    $isTransient = $false
+    $isFatal = $false
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return [pscustomobject]@{ Message = $message; IsRateLimited = $false; IsTransient = $false; IsFatal = $false }
+    }
+
+    if ($Text -match '429 Too Many Requests' -or $Text -match 'error code:\s*1015') {
+        $message = 'Cloudflare quick tunnel rate limited (429/1015). Wait before retrying.'
+        $isRateLimited = $true
+        $isTransient = $true
+    }
+    elseif ($Text -match 'failed to request quick Tunnel') { $message = 'cloudflared failed to request quick tunnel'; $isTransient = $true }
+    elseif ($Text -match '\bEOF\b') { $message = 'cloudflared quick tunnel request ended with EOF'; $isTransient = $true }
+    elseif ($Text -match 'underlying connection was closed' -or $Text -match 'An error occurred on a send' -or $Text -match 'SSL/TLS' -or $Text -match 'secure channel' -or $Text -match 'connection.*closed') { $message = 'transient TLS/socket error while probing quick tunnel'; $isTransient = $true }
+    elseif ($Text -match 'failed to unmarshal quick Tunnel') { $message = 'cloudflared received an invalid quick tunnel response'; $isTransient = $true }
+    elseif (Test-QuickTunnelEdgeFailure -Text $Text) { $message = 'cloudflared failed to connect to Cloudflare edge'; $isTransient = $true }
+    elseif ($Text -match 'cloudflared') { $message = 'cloudflared exited before a quick tunnel URL was emitted'; $isTransient = $true }
+
+    return [pscustomobject]@{ Message = $message; IsRateLimited = $isRateLimited; IsTransient = $isTransient; IsFatal = $isFatal }
+}
+
+function Get-QuickTunnelStartBackoffSeconds {
+    param([int]$FailureCount, [bool]$RateLimited, [bool]$Transient)
+    $n = [Math]::Max($FailureCount, 1)
+    if ($RateLimited) {
+        switch ([Math]::Min($n, 5)) { 1 { return 300 } 2 { return 600 } 3 { return 900 } 4 { return 1800 } default { return 3600 } }
+    }
+    if ($Transient) {
+        switch ([Math]::Min($n, 5)) { 1 { return 60 } 2 { return 120 } 3 { return 300 } 4 { return 600 } default { return 900 } }
+    }
+    switch ([Math]::Min($n, 4)) { 1 { return 30 } 2 { return 60 } 3 { return 120 } default { return 300 } }
+}
+
+function Get-CombinedLogText {
+    param([string[]]$LogPaths)
+    $combined = ''
+    foreach ($logPath in @($LogPaths)) {
+        if (-not [string]::IsNullOrWhiteSpace($logPath) -and (Test-Path -LiteralPath $logPath)) {
+            try { $combined += "`n" + (Get-Content -LiteralPath $logPath -Raw -Encoding UTF8 -ErrorAction Stop) } catch { }
+        }
+    }
+    return $combined
+}
+
+function Test-QuickTunnelEdgeReady {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $false
+    }
+
+    return ($Text -match 'Registered tunnel connection' -or
+        $Text -match 'Connection.*registered' -or
+        $Text -match 'Tunnel connection.*registered')
+}
+
+function Test-QuickTunnelEdgeFailure {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $false
+    }
+
+    return ($Text -match 'Failed to dial a quic connection' -or
+        $Text -match 'failed to dial to edge' -or
+        $Text -match 'timeout: no recent network activity' -or
+        $Text -match 'Unable to establish.*connection' -or
+        $Text -match 'connection.*edge.*failed')
+}
+
+function Wait-ForQuickTunnelUrl {
+    param([string[]]$LogPaths, [int]$TimeoutSeconds = 45, [int]$ProcessId = 0)
+    $script:LastQuickTunnelFailureInfo = $null
+    $quickTunnelPattern = 'https://(?!api\.)[a-z0-9-]+\.trycloudflare\.com'
+    $localTestTunnelPattern = 'http://127\.0\.0\.1:\d+'
+    $allowLocalPublicUrlForTests = (
+        (Get-MergedConfigValue -EnvMap $envMap -Name 'NOTION_LOCAL_OPS_ALLOW_LOCAL_PUBLIC_URL_FOR_TESTS' -Default '') -eq '1' -or
+        -not [string]::IsNullOrWhiteSpace((Get-MergedConfigValue -EnvMap $envMap -Name 'FAKE_CLOUDFLARED_STATE' -Default ''))
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $combined = ''
+    while ((Get-Date) -lt $deadline) {
+        $combined = Get-CombinedLogText -LogPaths $LogPaths
+        if (-not [string]::IsNullOrWhiteSpace($combined)) {
+            $quickMatches = [regex]::Matches($combined, $quickTunnelPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if ($quickMatches.Count -gt 0) {
+                $quickUrl = $quickMatches[$quickMatches.Count - 1].Value
+                if (Test-QuickTunnelEdgeReady -Text $combined) { return $quickUrl }
+                if (Test-QuickTunnelEdgeFailure -Text $combined) {
+                    $script:LastQuickTunnelFailureInfo = [pscustomobject]@{
+                        Message = 'cloudflared got a quick tunnel URL but failed to connect to Cloudflare edge'
+                        IsRateLimited = $false
+                        IsTransient = $true
+                        IsFatal = $false
+                    }
+                    break
+                }
+            }
+            elseif ($allowLocalPublicUrlForTests) {
+                $localMatches = [regex]::Matches($combined, $localTestTunnelPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                if ($localMatches.Count -gt 0) { return $localMatches[$localMatches.Count - 1].Value }
+            }
+            $failureInfo = Get-QuickTunnelFailureInfo -Text $combined
+            if ($failureInfo.IsRateLimited -or ($failureInfo.IsTransient -and $combined -match 'failed to request quick Tunnel|failed to unmarshal quick Tunnel|\bEOF\b')) {
+                $script:LastQuickTunnelFailureInfo = $failureInfo
+                break
+            }
+        }
+        if ($ProcessId -gt 0 -and -not (Test-ProcessAlive -ProcessId $ProcessId)) {
+            $script:LastQuickTunnelFailureInfo = Get-QuickTunnelFailureInfo -Text $combined
+            break
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    if ($null -eq $script:LastQuickTunnelFailureInfo) { $script:LastQuickTunnelFailureInfo = Get-QuickTunnelFailureInfo -Text $combined }
+    return $null
+}
+
+function Get-RequestedInstanceToken {
+    param(
+        [int]$Index,
+        [string]$PrimaryToken,
+        [string]$SecondToken
+    )
+
+    if ($Index -eq 2 -and -not [string]::IsNullOrWhiteSpace($SecondToken)) {
+        return $SecondToken
+    }
+
+    return $PrimaryToken
+}
+
+function Initialize-InstanceLayout {
+    param([pscustomobject]$Instance)
+
+    New-Item -ItemType Directory -Force -Path $Instance.StateDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $Instance.InstanceDir | Out-Null
+
+    foreach ($path in @($Instance.ServerLogPath, $Instance.CloudflaredStdoutLogPath, $Instance.CloudflaredStderrLogPath)) {
+        if (-not (Test-Path -LiteralPath $path)) {
+            New-Item -ItemType File -Force -Path $path | Out-Null
+        }
+    }
+}
+
+function New-ManagedInstanceRecord {
+    param(
+        [int]$Index,
+        [int]$Port,
+        [string]$BindHost,
+        [string]$WorkspaceRoot,
+        [string]$BaseStateDir,
+        [string]$AuthToken,
+        [string]$LauncherInstancesDir
+    )
+
+    $instanceName = "mcp-$Index"
+    $instanceStateDir = Join-Path $BaseStateDir ("instance-{0}-port-{1}" -f $Index, $Port)
+    $instanceDir = Join-Path $LauncherInstancesDir ("{0}-port-{1}" -f $instanceName, $Port)
+    $serverLogPath = Join-Path $instanceDir 'server.log'
+    $cloudflaredStdoutLogPath = Join-Path $instanceDir 'cloudflared.stdout.log'
+    $cloudflaredStderrLogPath = Join-Path $instanceDir 'cloudflared.stderr.log'
+    $originUrl = "http://$BindHost`:$Port"
+
+    $instance = [pscustomobject]@{
+        Name = $instanceName
+        Host = $BindHost
+        Port = $Port
+        Token = $AuthToken
+        LocalUrl = "$originUrl/mcp"
+        PublicUrl = ''
+        PublicMcpUrl = ''
+        ServerProcessId = 0
+        CloudflaredProcessId = 0
+        StateDir = $instanceStateDir
+        InstanceDir = $instanceDir
+        ServerLogPath = $serverLogPath
+        CloudflaredStdoutLogPath = $cloudflaredStdoutLogPath
+        CloudflaredStderrLogPath = $cloudflaredStderrLogPath
+        StartedAt = ''
+        RestartCount = 0
+        LastFailureReason = ''
+        LastProbeAt = ''
+        TunnelMode = 'quick'
+        ConsecutivePublicProbeFailures = 0
+        ConsecutiveRepairFailures = 0
+        NeedsNotionUrlUpdate = $false
+        UrlChangedAt = ''
+        LastPublicProbeStatus = 'unknown'
+        LastPublicProbeMessage = ''
+        LastRepairAction = ''
+        ProbeWarmupCyclesRemaining = 0
+        ConsecutiveTunnelStartFailures = 0
+        LastTunnelStartAttemptAt = ''
+        NextTunnelStartAttemptAt = ''
+    }
+
+    Initialize-InstanceLayout -Instance $instance
+    return $instance
+}
+
+function Start-ManagedServer {
+    param(
+        [pscustomobject]$Instance,
+        [pscustomobject]$RuntimeConfig
+    )
+
+    $runnerScript = Join-Path $PSScriptRoot 'run-mcp-instance.ps1'
+    if (-not (Test-Path -LiteralPath $runnerScript)) {
+        throw "Missing runner script: $runnerScript"
+    }
+
+    $argList = @(
+        '-NoLogo',
+        '-NoProfile',
+        '-ExecutionPolicy Bypass',
+        ('-File "{0}"' -f $runnerScript),
+        ('-ServerExecutable "{0}"' -f $RuntimeConfig.ServerExecutable),
+        ('-BindHost "{0}"' -f $Instance.Host),
+        ('-Port {0}' -f $Instance.Port),
+        ('-WorkspaceRoot "{0}"' -f $RuntimeConfig.WorkspaceRoot),
+        ('-StateDir "{0}"' -f $Instance.StateDir),
+        ('-AuthToken "{0}"' -f $Instance.Token),
+        ('-CodexCommand "{0}"' -f $RuntimeConfig.CodexCommand),
+        ('-ClaudeCommand "{0}"' -f $RuntimeConfig.ClaudeCommand),
+        ('-CommandTimeout {0}' -f $RuntimeConfig.CommandTimeout),
+        ('-DelegateTimeout {0}' -f $RuntimeConfig.DelegateTimeout),
+        ('-LogPath "{0}"' -f $Instance.ServerLogPath)
+    ) -join ' '
+
+    $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -WorkingDirectory $RepoRoot -WindowStyle Hidden -PassThru
+    if (-not (Wait-ForPort -BindHost $Instance.Host -Port $Instance.Port -TimeoutSeconds 20)) {
+        Stop-ManagedProcess -ProcessId $process.Id
+        throw "MCP instance $($Instance.Name) did not become ready on http://$($Instance.Host):$($Instance.Port). See $($Instance.ServerLogPath)"
+    }
+
+    $Instance.ServerProcessId = $process.Id
+    $Instance.StartedAt = (Get-Date).ToString('o')
+}
+
+function Start-QuickTunnel {
+    param(
+        [pscustomobject]$Instance,
+        [pscustomobject]$RuntimeConfig
+    )
+
+    Stop-ManagedProcess -ProcessId ([int]$Instance.CloudflaredProcessId)
+    $Instance.CloudflaredProcessId = 0
+    foreach ($path in @($Instance.CloudflaredStdoutLogPath, $Instance.CloudflaredStderrLogPath)) {
+        Reset-LogFile -Path $path
+    }
+
+    $Instance.LastTunnelStartAttemptAt = (Get-Date).ToString('o')
+    $originUrl = "http://$($Instance.Host):$($Instance.Port)"
+    $quickTunnelUrl = $null
+    $launchAttempts = 3
+    $process = $null
+    $cloudflaredExecutable = $RuntimeConfig.CloudflaredExecutable
+    $cloudflaredProtocol = ''
+    if ($null -ne $RuntimeConfig -and $null -ne $RuntimeConfig.PSObject.Properties['CloudflaredProtocol']) {
+        $cloudflaredProtocol = [string]$RuntimeConfig.CloudflaredProtocol
+    }
+    $tunnelArgs = @('tunnel', '--url', $originUrl)
+    if (-not [string]::IsNullOrWhiteSpace($cloudflaredProtocol)) {
+        $tunnelArgs += @('--protocol', $cloudflaredProtocol)
+    }
+    $lastFailureInfo = $null
+    for ($attempt = 1; $attempt -le $launchAttempts; $attempt++) {
+        $extension = [System.IO.Path]::GetExtension($cloudflaredExecutable).ToLowerInvariant()
+        if ($extension -eq '.ps1') {
+            $process = Start-Process `
+                -FilePath 'powershell.exe' `
+                -ArgumentList (@('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $cloudflaredExecutable) + $tunnelArgs) `
+                -WorkingDirectory $RepoRoot `
+                -RedirectStandardOutput $Instance.CloudflaredStdoutLogPath `
+                -RedirectStandardError $Instance.CloudflaredStderrLogPath `
+                -WindowStyle Hidden `
+                -PassThru
+        }
+        elseif ($extension -eq '.py') {
+            $process = Start-Process `
+                -FilePath $RuntimeConfig.PythonPath `
+                -ArgumentList (@($cloudflaredExecutable) + $tunnelArgs) `
+                -WorkingDirectory $RepoRoot `
+                -RedirectStandardOutput $Instance.CloudflaredStdoutLogPath `
+                -RedirectStandardError $Instance.CloudflaredStderrLogPath `
+                -WindowStyle Hidden `
+                -PassThru
+        }
+        else {
+            $process = Start-Process `
+                -FilePath $cloudflaredExecutable `
+                -ArgumentList $tunnelArgs `
+                -WorkingDirectory $RepoRoot `
+                -RedirectStandardOutput $Instance.CloudflaredStdoutLogPath `
+                -RedirectStandardError $Instance.CloudflaredStderrLogPath `
+                -WindowStyle Hidden `
+                -PassThru
+        }
+
+        $quickTunnelUrl = Wait-ForQuickTunnelUrl -LogPaths @($Instance.CloudflaredStderrLogPath, $Instance.CloudflaredStdoutLogPath) -TimeoutSeconds 25 -ProcessId $process.Id
+        if (-not [string]::IsNullOrWhiteSpace($quickTunnelUrl)) {
+            break
+        }
+
+        $lastFailureInfo = $script:LastQuickTunnelFailureInfo
+        Stop-ManagedProcess -ProcessId $process.Id
+        $process = $null
+        if ($attempt -lt $launchAttempts) {
+            $shortDelay = 2
+            if ($null -ne $lastFailureInfo -and $lastFailureInfo.IsRateLimited) { $shortDelay = 10 }
+            Start-Sleep -Seconds $shortDelay
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($quickTunnelUrl) -or $null -eq $process) {
+        if ($null -eq $lastFailureInfo) { $lastFailureInfo = $script:LastQuickTunnelFailureInfo }
+        if ($null -eq $lastFailureInfo) { $lastFailureInfo = Get-QuickTunnelFailureInfo -Text (Get-CombinedLogText -LogPaths @($Instance.CloudflaredStderrLogPath, $Instance.CloudflaredStdoutLogPath)) }
+        $Instance.ConsecutiveTunnelStartFailures = [int]$Instance.ConsecutiveTunnelStartFailures + 1
+        $backoffSeconds = Get-QuickTunnelStartBackoffSeconds `
+            -FailureCount ([int]$Instance.ConsecutiveTunnelStartFailures) `
+            -RateLimited ([bool]$lastFailureInfo.IsRateLimited) `
+            -Transient ([bool]$lastFailureInfo.IsTransient)
+        $Instance.NextTunnelStartAttemptAt = (Get-Date).AddSeconds($backoffSeconds).ToString('o')
+        $Instance.LastPublicProbeStatus = 'tunnel_start_failed'
+        $Instance.LastPublicProbeMessage = $lastFailureInfo.Message
+        $Instance.LastFailureReason = "Quick tunnel start failed after $launchAttempts attempts: $($lastFailureInfo.Message). Next retry after $($Instance.NextTunnelStartAttemptAt). See $($Instance.CloudflaredStderrLogPath)"
+        $Instance.PublicUrl = ''
+        $Instance.PublicMcpUrl = ''
+        return $false
+    }
+
+    $oldPublicMcpUrl = [string]$Instance.PublicMcpUrl
+    $Instance.CloudflaredProcessId = $process.Id
+    $Instance.PublicUrl = $quickTunnelUrl
+    $Instance.PublicMcpUrl = "$quickTunnelUrl/mcp"
+    $Instance.TunnelMode = 'quick'
+    $Instance.ProbeWarmupCyclesRemaining = 3
+    $Instance.LastPublicProbeStatus = 'pending'
+    $Instance.LastPublicProbeMessage = 'waiting for public tunnel warm-up'
+    $Instance.ConsecutiveTunnelStartFailures = 0
+    $Instance.NextTunnelStartAttemptAt = ''
+    $Instance.LastFailureReason = ''
+    if (-not [string]::IsNullOrWhiteSpace($oldPublicMcpUrl) -and $oldPublicMcpUrl -ne $Instance.PublicMcpUrl) {
+        $Instance.RestartCount = [int]$Instance.RestartCount + 1
+        $Instance.NeedsNotionUrlUpdate = $true
+        $Instance.UrlChangedAt = (Get-Date).ToString('o')
+    }
+    return $true
+}
+
+function Invoke-PublicMcpProbe {
+    param(
+        [pscustomobject]$Instance,
+        [int]$TimeoutSeconds = 5
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Instance.PublicMcpUrl)) {
+        return [pscustomobject]@{
+            Success = $false
+            StatusCode = 0
+            Message = 'missing public MCP URL'
+            IsTransientError = $false
+        }
+    }
+
+    $headers = @{}
+    if (-not [string]::IsNullOrWhiteSpace($Instance.Token)) {
+        $headers['Authorization'] = "Bearer $($Instance.Token)"
+    }
+
+    # Try HEAD first; if it fails with a connection/TLS error, fall back to GET.
+    # Cloudflare quick tunnels sometimes drop HEAD requests due to TLS handshake
+    # issues ("The underlying connection was closed"), while GET works reliably.
+    foreach ($method in @('Head', 'Get')) {
+        try {
+            $response = Invoke-WebRequest -Uri $Instance.PublicMcpUrl -Method $method -Headers $headers -UseBasicParsing -TimeoutSec $TimeoutSeconds
+            $statusCode = [int]$response.StatusCode
+            return [pscustomobject]@{
+                Success = ($statusCode -eq 200 -or $statusCode -eq 204)
+                StatusCode = $statusCode
+                Message = "HTTP $statusCode ($method)"
+                IsTransientError = $false
+            }
+        }
+        catch {
+            $statusCode = 0
+            $message = $_.Exception.Message
+            $response = $_.Exception.Response
+            if ($null -ne $response) {
+                try {
+                    $statusCode = [int]$response.StatusCode.value__
+                    $message = "HTTP $statusCode ($method)"
+                }
+                catch {
+                }
+            }
+
+            # Classify: connection-level errors (TLS, DNS, socket) are transient
+            # and should NOT count the same as a definitive HTTP error (404, 405).
+            $isTransient = $false
+            if ($statusCode -eq 0) {
+                $transientPatterns = @('The underlying connection was closed','An error occurred on a send','An error occurred on a receive','Unable to read data','Unable to write data','The connection was closed','SSL/TLS','secure channel','Could not create SSL/TLS','remote name could not be resolved','No such host','connection attempt failed','Operation timed out','EOF')
+                foreach ($p in $transientPatterns) {
+                    if ($message.Contains($p)) {
+                        $isTransient = $true
+                        break
+                    }
+                }
+            }
+
+            if ($isTransient) {
+                # Transient connection error — don't retry with GET, it'll likely
+                # hit the same TLS issue. Return as transient so monitor can
+                # handle it differently.
+                return [pscustomobject]@{
+                    Success = $false
+                    StatusCode = $statusCode
+                    Message = "transient: $message"
+                    IsTransientError = $true
+                }
+            }
+
+            # Got an HTTP-level error (4xx, 5xx) — if this was HEAD, try GET next
+            if ($method -eq 'Head') {
+                continue
+            }
+
+            # GET also failed with an HTTP error — definitive failure
+            return [pscustomobject]@{
+                Success = $false
+                StatusCode = $statusCode
+                Message = $message
+                IsTransientError = $false
+            }
+        }
+    }
+
+    # Both HEAD and GET failed at HTTP level
+    return [pscustomobject]@{
+        Success = $false
+        StatusCode = 0
+        Message = 'both HEAD and GET failed'
+        IsTransientError = $false
+    }
+}
+
+function Invoke-LocalMcpProbe {
+    param(
+        [pscustomobject]$Instance,
+        [int]$TimeoutSeconds = 3
+    )
+
+    $localMcpUrl = "http://$($Instance.Host):$($Instance.Port)/mcp"
+
+    try {
+        $response = Invoke-WebRequest -Uri $localMcpUrl -Method Head -UseBasicParsing -TimeoutSec $TimeoutSeconds
+        $statusCode = [int]$response.StatusCode
+        return [pscustomobject]@{
+            Success = ($statusCode -eq 200 -or $statusCode -eq 204)
+            StatusCode = $statusCode
+            Message = "HTTP $statusCode"
+        }
+    }
+    catch {
+        $statusCode = 0
+        $message = $_.Exception.Message
+        $response = $_.Exception.Response
+        if ($null -ne $response) {
+            try {
+                $statusCode = [int]$response.StatusCode.value__
+                $message = "HTTP $statusCode"
+            }
+            catch {
+            }
+        }
+        return [pscustomobject]@{
+            Success = $false
+            StatusCode = $statusCode
+            Message = $message
+        }
+    }
+}
+
+function Probe-LocalInstance {
+    param([pscustomobject]$Instance)
+
+    $serverAlive = Test-ProcessAlive -ProcessId ([int]$Instance.ServerProcessId)
+    $listening = Test-PortListening -BindHost $Instance.Host -Port $Instance.Port
+
+    $message = if ($serverAlive -and $listening) {
+        'process alive and port listening'
+    }
+    elseif ($serverAlive -and -not $listening) {
+        'process alive but port not listening'
+    }
+    elseif (-not $serverAlive -and $listening) {
+        'port listening but managed server PID missing'
+    }
+    else {
+        'process stopped and port closed'
+    }
+
+    return [pscustomobject]@{
+        Success = ($serverAlive -and $listening)
+        Message = $message
+        ServerAlive = $serverAlive
+        Listening = $listening
+    }
+}
+
+function Get-RestartBackoffSeconds {
+    param([int]$FailureCount)
+
+    # Exponential backoff: 2, 5, 10, 20, 40, 60, 90 ... capped at 120
+    $seconds = switch ([Math]::Min([Math]::Max($FailureCount, 0), 6)) {
+        0 { 2 }
+        1 { 5 }
+        2 { 10 }
+        3 { 20 }
+        4 { 40 }
+        5 { 60 }
+        default { 90 }
+    }
+
+    # If cloudflared stderr shows 429 rate-limit, add extra delay
+    return $seconds
+}
+
+function Repair-Instance {
+    param(
+        [pscustomobject]$Instance,
+        [pscustomobject]$RuntimeConfig,
+        [bool]$RestartServer,
+        [bool]$RestartTunnel,
+        [string]$Reason
+    )
+
+    $backoffSeconds = Get-RestartBackoffSeconds -FailureCount ([int]$Instance.ConsecutiveRepairFailures)
+
+    # If last tunnel failure was a 429 rate-limit, add 30s extra backoff
+    # to avoid hammering cloudflare and getting permanently blocked
+    $cloudflaredStderrPath = [string]$Instance.CloudflaredStderrLogPath
+    if (-not [string]::IsNullOrWhiteSpace($cloudflaredStderrPath) -and (Test-Path -LiteralPath $cloudflaredStderrPath)) {
+        try {
+            $stderrContent = Get-Content -LiteralPath $cloudflaredStderrPath -Raw -Encoding UTF8 -ErrorAction Stop
+            if ($stderrContent -match '429 Too Many Requests' -or $stderrContent -match 'error code: 1015') {
+                $backoffSeconds = $backoffSeconds + 30
+            }
+        }
+        catch {
+        }
+    }
+
+    if ($backoffSeconds -gt 0) {
+        Start-Sleep -Seconds $backoffSeconds
+    }
+
+    $Instance.RestartCount = [int]$Instance.RestartCount + 1
+    $Instance.ConsecutiveRepairFailures = [int]$Instance.ConsecutiveRepairFailures + 1
+    $Instance.LastFailureReason = $Reason
+    if ($RestartServer) {
+        $Instance.LastRepairAction = 'restart_server_and_tunnel'
+    }
+    else {
+        $Instance.LastRepairAction = 'restart_tunnel'
+    }
+
+    try {
+        if ($RestartTunnel) {
+            Stop-ManagedProcess -ProcessId ([int]$Instance.CloudflaredProcessId)
+            $Instance.CloudflaredProcessId = 0
+        }
+        if ($RestartServer) {
+            Stop-ManagedProcess -ProcessId ([int]$Instance.ServerProcessId)
+            $Instance.ServerProcessId = 0
+        }
+
+        $repairOk = $true
+        if ($RestartServer) {
+            Start-ManagedServer -Instance $Instance -RuntimeConfig $RuntimeConfig
+            $repairOk = Start-QuickTunnel -Instance $Instance -RuntimeConfig $RuntimeConfig
+        }
+        elseif ($RestartTunnel) {
+            $repairOk = Start-QuickTunnel -Instance $Instance -RuntimeConfig $RuntimeConfig
+        }
+
+        if ($repairOk) {
+            $Instance.ConsecutivePublicProbeFailures = 0
+            $Instance.ConsecutiveRepairFailures = 0
+            $Instance.LastFailureReason = ''
+            return $true
+        }
+        return $false
+    }
+    catch {
+        $Instance.LastFailureReason = "$Reason :: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Get-InstanceStatus {
+    param([pscustomobject]$Instance)
+
+    $serverAlive = Test-ProcessAlive -ProcessId ([int]$Instance.ServerProcessId)
+    $tunnelAlive = Test-ProcessAlive -ProcessId ([int]$Instance.CloudflaredProcessId)
+    $listening = Test-PortListening -BindHost $Instance.Host -Port $Instance.Port
+
+    $status = if ($serverAlive -and $listening -and $Instance.LastPublicProbeStatus -eq 'ok') {
+        'Running'
+    }
+    elseif ($serverAlive -and $listening -and $Instance.LastPublicProbeStatus -eq 'warmup') {
+        'Warmup'
+    }
+    elseif ($serverAlive -and $listening -and $Instance.LastPublicProbeStatus -eq 'tunnel_start_failed') {
+        'TunnelStartFail'
+    }
+    elseif ($serverAlive -and $listening -and [string]::IsNullOrWhiteSpace($Instance.PublicMcpUrl)) {
+        'TunnelUrlMissing'
+    }
+    elseif ($serverAlive -and $listening -and $Instance.LastPublicProbeStatus -eq 'failed') {
+        'PublicProbeFail'
+    }
+    elseif ($serverAlive -and $listening -and -not $tunnelAlive) {
+        'TunnelStopped'
+    }
+    elseif ($serverAlive -and -not $listening) {
+        'Starting'
+    }
+    elseif (-not $serverAlive -and $tunnelAlive) {
+        'ServerStopped'
+    }
+    else {
+        'Stopped'
+    }
+
+    return [pscustomobject]@{
+        Instance = $Instance.Name
+        ServerPID = $Instance.ServerProcessId
+        TunnelPID = $Instance.CloudflaredProcessId
+        Port = $Instance.Port
+        Status = $status
+        Token = $Instance.Token
+        LocalUrl = $Instance.LocalUrl
+        PublicUrl = $Instance.PublicUrl
+        PublicMcpUrl = $Instance.PublicMcpUrl
+        RestartCount = $Instance.RestartCount
+        LastProbeAt = $Instance.LastProbeAt
+        LastFailureReason = $Instance.LastFailureReason
+        NeedsNotionUrlUpdate = $Instance.NeedsNotionUrlUpdate
+        ProbeWarmupCyclesRemaining = $Instance.ProbeWarmupCyclesRemaining
+        NextTunnelStartAttemptAt = $Instance.NextTunnelStartAttemptAt
+        LastPublicProbeStatus = $Instance.LastPublicProbeStatus
+        LastPublicProbeMessage = $Instance.LastPublicProbeMessage
+        ServerLog = $Instance.ServerLogPath
+        CloudflaredStdoutLog = $Instance.CloudflaredStdoutLogPath
+        CloudflaredStderrLog = $Instance.CloudflaredStderrLogPath
+    }
+}
+
+function Write-StoppedSnapshot {
+    param(
+        [string]$StatusPath,
+        [string]$WorkspaceRoot,
+        [string]$LauncherStatePath
+    )
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add(("Updated: {0}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')))
+    $lines.Add(("Repo: {0}" -f $RepoRoot))
+    $lines.Add(("Workspace: {0}" -f $WorkspaceRoot))
+    $lines.Add('')
+    $lines.Add('All managed MCP instances and Cloudflare quick tunnels have been stopped.')
+    $lines.Add(("State File: {0}" -f $LauncherStatePath))
+    Ensure-ParentDirectory -Path $StatusPath
+    Set-Content -LiteralPath $StatusPath -Value $lines -Encoding UTF8
+}
+
+function Write-StatusSnapshot {
+    param(
+        [string]$StatusPath,
+        [object[]]$Rows,
+        [int]$RequestedCount,
+        [int]$RequestedBasePort,
+        [string]$BindHost,
+        [string]$WorkspaceRoot,
+        [string]$LauncherStatePath
+    )
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add(("Updated: {0}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')))
+    $lines.Add(("Repo: {0}" -f $RepoRoot))
+    $lines.Add(("Workspace: {0}" -f $WorkspaceRoot))
+    $lines.Add(("Bind Host: {0}" -f $BindHost))
+    $lines.Add(("Requested Count: {0}" -f $RequestedCount))
+    $lines.Add(("Requested Base Port: {0}" -f $RequestedBasePort))
+    $lines.Add(("State File: {0}" -f $LauncherStatePath))
+    $lines.Add('')
+
+    foreach ($row in $Rows) {
+        $lines.Add(("[{0}] {1}" -f $row.Instance, $row.Status))
+        $lines.Add(("  Token: {0}" -f $row.Token))
+        $lines.Add(("  Local URL: {0}" -f $row.LocalUrl))
+        $lines.Add(("  Public URL: {0}" -f $row.PublicUrl))
+        $lines.Add(("  Public MCP URL: {0}" -f $row.PublicMcpUrl))
+        $lines.Add(("  Restart Count: {0}" -f $row.RestartCount))
+        $lines.Add(("  Last Probe At: {0}" -f $row.LastProbeAt))
+        $lines.Add(("  Server PID: {0}" -f $row.ServerPID))
+        $lines.Add(("  cloudflared PID: {0}" -f $row.TunnelPID))
+        if ($row.Status -eq 'Warmup') {
+            $lines.Add(("  Warm-up cycles remaining: {0}" -f $row.ProbeWarmupCyclesRemaining))
+        }
+        if ($row.Status -eq 'TunnelStartFail' -and -not [string]::IsNullOrWhiteSpace($row.NextTunnelStartAttemptAt)) {
+            $lines.Add(("  Next tunnel retry: {0}" -f $row.NextTunnelStartAttemptAt))
+        }
+        if ($row.NeedsNotionUrlUpdate) {
+            $lines.Add('  NOTE: Public MCP URL changed. Keep the same Notion Agent connection name; update only the connector URL manually.')
+        }
+        if (-not [string]::IsNullOrWhiteSpace($row.LastFailureReason)) {
+            $lines.Add(("  Last Failure: {0}" -f $row.LastFailureReason))
+        }
+        $lines.Add(("  Server Log: {0}" -f $row.ServerLog))
+        $lines.Add(("  Tunnel stdout log: {0}" -f $row.CloudflaredStdoutLog))
+        $lines.Add(("  Tunnel stderr log: {0}" -f $row.CloudflaredStderrLog))
+        $lines.Add('')
+    }
+
+    Ensure-ParentDirectory -Path $StatusPath
+    Set-Content -LiteralPath $StatusPath -Value $lines -Encoding UTF8
+}
+
+function Convert-KeyToPanelCommand {
+    param(
+        [string]$KeyName,
+        [string]$Character
+    )
+
+    $keyText = ''
+    if (-not [string]::IsNullOrWhiteSpace($Character)) {
+        $keyText = $Character.ToUpperInvariant()
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($KeyName)) {
+        $keyText = $KeyName.ToUpperInvariant()
+    }
+
+    switch ($keyText) {
+        '13' { return 'refresh' }
+        '76' { return 'logs' }
+        '81' { return 'quit' }
+        '82' { return 'refresh' }
+        '83' { return 'stop' }
+        'ENTER' { return 'refresh' }
+        "`r" { return 'refresh' }
+        "`n" { return 'refresh' }
+        'R' { return 'refresh' }
+        'L' { return 'logs' }
+        'S' { return 'stop' }
+        'Q' { return 'quit' }
+        default {
+            if (-not [string]::IsNullOrWhiteSpace($Character)) {
+                return "unknown:$Character"
+            }
+            if (-not [string]::IsNullOrWhiteSpace($KeyName)) {
+                return "unknown:$KeyName"
+            }
+            return ''
+        }
+    }
+}
+
+function Try-ReadPanelCommand {
+    if ($NonInteractive) {
+        return ''
+    }
+
+    # PowerShell console hosts launched from .cmd are more reliable through RawUI
+    # than through [Console]::KeyAvailable. Keep Console as a fallback.
+    try {
+        if ($null -ne $Host -and $null -ne $Host.UI -and $null -ne $Host.UI.RawUI -and $Host.UI.RawUI.KeyAvailable) {
+            $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+            return Convert-KeyToPanelCommand -KeyName ([string]$key.VirtualKeyCode) -Character ([string]$key.Character)
+        }
+    }
+    catch {
+        $script:PanelInputWarning = "RawUI input unavailable: $($_.Exception.Message)"
+    }
+
+    try {
+        if (-not [Console]::KeyAvailable) {
+            return ''
+        }
+
+        $key = [Console]::ReadKey($true)
+        return Convert-KeyToPanelCommand -KeyName ([string]$key.Key) -Character ([string]$key.KeyChar)
+    }
+    catch {
+        $script:PanelInputWarning = "Console input unavailable: $($_.Exception.Message)"
+        return ''
+    }
+}
+
+function Handle-PanelCommand {
+    param(
+        [string]$Command,
+        [object[]]$Instances,
+        [string]$LauncherStateDir,
+        [string]$LauncherStatePath,
+        [string]$WorkspaceRoot,
+        [string]$StatusPath
+    )
+
+    switch ($Command) {
+        '' { return 'continue' }
+        'refresh' { return 'continue' }
+        'logs' {
+            Start-Process explorer.exe $LauncherStateDir | Out-Null
+            return 'continue'
+        }
+        'stop' {
+            Write-Host ''
+            Write-Host 'Stopping all managed MCP instances and Cloudflare quick tunnels...' -ForegroundColor Yellow
+            Stop-ManagedInstances -Instances $Instances
+            Remove-LauncherState -LauncherStatePath $LauncherStatePath
+            Write-StoppedSnapshot -StatusPath $StatusPath -WorkspaceRoot $WorkspaceRoot -LauncherStatePath $LauncherStatePath
+            Write-Host 'All managed MCP instances and tunnels have been stopped.' -ForegroundColor Green
+            return 'stop'
+        }
+        'quit' {
+            return 'quit'
+        }
+        default {
+            if (-not $NonInteractive) {
+                Write-Host ("Unknown command key: {0}" -f $Command) -ForegroundColor Red
+                Write-Host 'Valid keys: [Enter]/R refresh, L logs, S stop, Q quit' -ForegroundColor Yellow
+                Start-Sleep -Seconds 1
+            }
+            return 'continue'
+        }
+    }
+}
+
+function Render-StatusPanel {
+    param(
+        [object[]]$Rows,
+        [string]$WorkspaceRoot,
+        [string]$StatusPath,
+        [string]$LauncherStatePath
+    )
+
+    if ($NonInteractive) {
+        return
+    }
+
+    Clear-Host
+    Write-Host '=== Notion Local MCP Status ===' -ForegroundColor Cyan
+    Write-Host ("Repo: {0}" -f $RepoRoot)
+    Write-Host ("Workspace: {0}" -f $WorkspaceRoot)
+    Write-Host ("Desktop status file: {0}" -f $StatusPath)
+    Write-Host ("State file: {0}" -f $LauncherStatePath)
+    Write-Host ''
+
+    $Rows | Format-Table -AutoSize Instance,ServerPID,TunnelPID,Port,Status,RestartCount,PublicMcpUrl
+
+    Write-Host ''
+    Write-Host 'Details:' -ForegroundColor DarkCyan
+    foreach ($row in $Rows) {
+        Write-Host ("- {0}" -f $row.Instance) -ForegroundColor DarkCyan
+        Write-Host ("    Local URL: {0}" -f $row.LocalUrl)
+        Write-Host ("    Public URL: {0}" -f $row.PublicUrl)
+        Write-Host ("    Public MCP URL: {0}" -f $row.PublicMcpUrl)
+        Write-Host ("    Restart Count: {0}" -f $row.RestartCount)
+        if ($row.Status -eq 'TunnelStartFail' -and -not [string]::IsNullOrWhiteSpace($row.NextTunnelStartAttemptAt)) {
+            Write-Host ("    Next tunnel retry: {0}" -f $row.NextTunnelStartAttemptAt) -ForegroundColor Yellow
+        }
+        if ($row.NeedsNotionUrlUpdate) {
+            Write-Host '    NOTE: Public MCP URL changed. Keep the same Notion Agent connection name; update only the connector URL manually.' -ForegroundColor Yellow
+        }
+        if (-not [string]::IsNullOrWhiteSpace($row.LastFailureReason)) {
+            Write-Host ("    Last Failure: {0}" -f $row.LastFailureReason) -ForegroundColor Yellow
+        }
+        Write-Host ("    Server Log: {0}" -f $row.ServerLog)
+        Write-Host ("    Tunnel stdout log: {0}" -f $row.CloudflaredStdoutLog)
+        Write-Host ("    Tunnel stderr log: {0}" -f $row.CloudflaredStderrLog)
+    }
+    Write-Host ''
+    if (-not [string]::IsNullOrWhiteSpace($script:PanelInputWarning)) {
+        Write-Host ("Input warning: {0}" -f $script:PanelInputWarning) -ForegroundColor DarkYellow
+    }
+    Write-Host 'Keys: [Enter]/R=refresh  L=open logs  S=shutdown all  Q=close panel only' -ForegroundColor Yellow
+}
+
+function Monitor-ManagedInstance {
+    param(
+        [pscustomobject]$Instance,
+        [pscustomobject]$RuntimeConfig
+    )
+
+    $Instance.LastProbeAt = (Get-Date).ToString('o')
+    $localProbe = Probe-LocalInstance -Instance $Instance
+
+    if ($localProbe.Success) {
+        if ([string]::IsNullOrWhiteSpace($Instance.PublicMcpUrl) -or $Instance.LastPublicProbeStatus -eq 'tunnel_start_failed' -or -not (Test-ProcessAlive -ProcessId ([int]$Instance.CloudflaredProcessId))) {
+            $retryDue = $true
+            if (-not [string]::IsNullOrWhiteSpace($Instance.NextTunnelStartAttemptAt)) {
+                try { $retryDue = ((Get-Date) -ge ([datetime]::Parse($Instance.NextTunnelStartAttemptAt))) }
+                catch { $retryDue = $true }
+            }
+            if ($retryDue) { [void](Start-QuickTunnel -Instance $Instance -RuntimeConfig $RuntimeConfig) }
+            else {
+                $Instance.LastPublicProbeStatus = 'tunnel_start_failed'
+                $Instance.LastPublicProbeMessage = "waiting for quick tunnel retry at $($Instance.NextTunnelStartAttemptAt)"
+            }
+            return Get-InstanceStatus -Instance $Instance
+        }
+
+        # During warm-up after a tunnel restart, skip public probe failure counting
+        if ([int]$Instance.ProbeWarmupCyclesRemaining -gt 0) {
+            $Instance.ProbeWarmupCyclesRemaining = [int]$Instance.ProbeWarmupCyclesRemaining - 1
+            $Instance.LastPublicProbeStatus = 'warmup'
+            $Instance.LastPublicProbeMessage = "warm-up cycle remaining: $($Instance.ProbeWarmupCyclesRemaining)"
+            # Still do the public probe but don't count failures
+            $publicProbeTimeoutSeconds = 10
+            if ($null -ne $RuntimeConfig -and $null -ne $RuntimeConfig.PSObject.Properties['PublicProbeTimeoutSeconds']) {
+                $publicProbeTimeoutSeconds = [int]$RuntimeConfig.PublicProbeTimeoutSeconds
+            }
+            $publicProbe = Invoke-PublicMcpProbe -Instance $Instance -TimeoutSeconds $publicProbeTimeoutSeconds
+            if ($publicProbe.Success) {
+                # Tunnel is ready early — cancel remaining warm-up
+                $Instance.ProbeWarmupCyclesRemaining = 0
+                $Instance.ConsecutivePublicProbeFailures = 0
+                $Instance.ConsecutiveRepairFailures = 0
+                $Instance.LastPublicProbeStatus = 'ok'
+                $Instance.LastPublicProbeMessage = $publicProbe.Message
+                if ([string]::IsNullOrWhiteSpace($Instance.LastFailureReason)) {
+                    $Instance.LastFailureReason = ''
+                }
+            }
+            # If public probe fails during warm-up, we just note it without counting
+            return Get-InstanceStatus -Instance $Instance
+        }
+
+        $publicProbeTimeoutSeconds = 10
+        if ($null -ne $RuntimeConfig -and $null -ne $RuntimeConfig.PSObject.Properties['PublicProbeTimeoutSeconds']) {
+            $publicProbeTimeoutSeconds = [int]$RuntimeConfig.PublicProbeTimeoutSeconds
+        }
+        $publicProbe = Invoke-PublicMcpProbe -Instance $Instance -TimeoutSeconds $publicProbeTimeoutSeconds
+        if ($publicProbe.Success) {
+            $Instance.ConsecutivePublicProbeFailures = 0
+            $Instance.ConsecutiveRepairFailures = 0
+            $Instance.LastPublicProbeStatus = 'ok'
+            $Instance.LastPublicProbeMessage = $publicProbe.Message
+            if ([string]::IsNullOrWhiteSpace($Instance.LastFailureReason)) {
+                $Instance.LastFailureReason = ''
+            }
+        }
+        else {
+            $Instance.ConsecutivePublicProbeFailures = [int]$Instance.ConsecutivePublicProbeFailures + 1
+            $Instance.LastPublicProbeStatus = 'failed'
+            $Instance.LastPublicProbeMessage = $publicProbe.Message
+            # Transient TLS/connection errors need more failures before triggering restart
+            $threshold = if ($publicProbe.IsTransientError) { 8 } else { 5 }
+            $Instance.LastFailureReason = "Public MCP probe failed ($($Instance.ConsecutivePublicProbeFailures)/$threshold): $($publicProbe.Message)"
+            if ($Instance.ConsecutivePublicProbeFailures -ge $threshold) {
+                # Sanity check: verify local HEAD /mcp before deciding to restart tunnel only
+                $localHeadProbe = Invoke-LocalMcpProbe -Instance $Instance
+                if ($localHeadProbe.Success) {
+                    # Local is healthy; keep the server and current tunnel process stable.
+                    $Instance.LastFailureReason = "Public MCP probe failed $threshold times (local HEAD OK; tunnel kept running): $($publicProbe.Message)"
+                }
+                else {
+                    # Local HEAD also failing — full restart
+                    [void](Repair-Instance `
+                        -Instance $Instance `
+                        -RuntimeConfig $RuntimeConfig `
+                        -RestartServer $true `
+                        -RestartTunnel $true `
+                        -Reason "Public MCP probe failed $threshold times + local HEAD also failed: local=$($localHeadProbe.Message) public=$($publicProbe.Message)")
+                }
+            }
+        }
+    }
+    else {
+        $Instance.ConsecutivePublicProbeFailures = 0
+        $Instance.LastPublicProbeStatus = 'skipped'
+        $Instance.LastPublicProbeMessage = "skipped: $($localProbe.Message)"
+        $Instance.LastFailureReason = "Local instance unhealthy: $($localProbe.Message)"
+        [void](Repair-Instance `
+            -Instance $Instance `
+            -RuntimeConfig $RuntimeConfig `
+            -RestartServer $true `
+            -RestartTunnel $true `
+            -Reason $Instance.LastFailureReason)
+    }
+
+    return Get-InstanceStatus -Instance $Instance
+}
+
+$envMap = Read-DotEnvFile -Path (Join-Path $RepoRoot '.env')
+$launcherStateDir = Get-MergedConfigValue -EnvMap $envMap -Name 'NOTION_LOCAL_OPS_LAUNCHER_STATE_DIR' -Default (Join-Path $RepoRoot '.state\launcher')
+$launcherStateDir = Normalize-ExistingPath -Path $launcherStateDir
+$launcherInstancesDir = Join-Path $launcherStateDir 'instances'
+$launcherStatePath = Join-Path $launcherStateDir 'active-instances.json'
+
+New-Item -ItemType Directory -Force -Path $launcherStateDir | Out-Null
+New-Item -ItemType Directory -Force -Path $launcherInstancesDir | Out-Null
+
+$statusPath = Get-MergedConfigValue -EnvMap $envMap -Name 'NOTION_LOCAL_OPS_STATUS_PATH' -Default $DesktopStatusPath
+$statusPath = Normalize-ExistingPath -Path $statusPath
+$bindHost = Get-MergedConfigValue -EnvMap $envMap -Name 'NOTION_LOCAL_OPS_HOST' -Default '127.0.0.1'
+$basePort = Get-MergedIntConfigValue -EnvMap $envMap -Name 'NOTION_LOCAL_OPS_PORT' -Default $DefaultBasePort
+$workspaceRoot = Get-MergedConfigValue -EnvMap $envMap -Name 'NOTION_LOCAL_OPS_WORKSPACE_ROOT' -Default $RepoRoot
+$workspaceRoot = Normalize-ExistingPath -Path $workspaceRoot
+$baseStateDir = Get-MergedConfigValue -EnvMap $envMap -Name 'NOTION_LOCAL_OPS_STATE_DIR' -Default (Join-Path $RepoRoot '.state\mcp-instances')
+$baseStateDir = Normalize-ExistingPath -Path $baseStateDir
+$authToken = Get-MergedConfigValue -EnvMap $envMap -Name 'NOTION_LOCAL_OPS_AUTH_TOKEN' -Default ''
+$secondAuthToken = Get-MergedConfigValue -EnvMap $envMap -Name 'NOTION_LOCAL_OPS_AUTH_TOKEN_SECOND' -Default $authToken
+$cloudflaredCommand = Get-MergedConfigValue -EnvMap $envMap -Name 'NOTION_LOCAL_OPS_CLOUDFLARED_COMMAND' -Default ''
+$cloudflaredProtocol = Get-MergedConfigValue -EnvMap $envMap -Name 'NOTION_LOCAL_OPS_CLOUDFLARED_PROTOCOL' -Default 'http2'
+$codexCommand = Get-MergedConfigValue -EnvMap $envMap -Name 'NOTION_LOCAL_OPS_CODEX_COMMAND' -Default 'codex'
+$claudeCommand = Get-MergedConfigValue -EnvMap $envMap -Name 'NOTION_LOCAL_OPS_CLAUDE_COMMAND' -Default 'claude'
+$commandTimeout = Get-MergedIntConfigValue -EnvMap $envMap -Name 'NOTION_LOCAL_OPS_COMMAND_TIMEOUT' -Default 120
+$delegateTimeout = Get-MergedIntConfigValue -EnvMap $envMap -Name 'NOTION_LOCAL_OPS_DELEGATE_TIMEOUT' -Default 1800
+$publicProbeTimeoutSeconds = Get-MergedIntConfigValue -EnvMap $envMap -Name 'NOTION_LOCAL_OPS_TEST_PUBLIC_PROBE_TIMEOUT_SECONDS' -Default 10
+
+if ($MonitorIntervalSeconds -le 0) {
+    throw "MonitorIntervalSeconds must be greater than 0."
+}
+
+$runtimeValidation = Test-LauncherRuntime -RepoRoot $RepoRoot
+$serverExecutable = $runtimeValidation.EntryPointPath
+$cloudflaredExecutable = Resolve-CloudflaredExecutable -PreferredCommand $cloudflaredCommand
+
+$runtimeConfig = [pscustomobject]@{
+    ServerExecutable = $serverExecutable
+    PythonPath = $runtimeValidation.PythonPath
+    CloudflaredExecutable = $cloudflaredExecutable
+    CloudflaredProtocol = $cloudflaredProtocol
+    WorkspaceRoot = $workspaceRoot
+    CodexCommand = $codexCommand
+    ClaudeCommand = $claudeCommand
+    CommandTimeout = $commandTimeout
+    DelegateTimeout = $delegateTimeout
+    PublicProbeTimeoutSeconds = $publicProbeTimeoutSeconds
+}
+
+if ($NonInteractive) {
+    $count = if ($RequestedCount -gt 0) { $RequestedCount } else { $DefaultCount }
+    $requestedBasePort = if ($RequestedBasePort -gt 0) { $RequestedBasePort } else { $basePort }
+}
+else {
+    Clear-Host
+    Write-Host '=== Notion Local MCP Launcher ===' -ForegroundColor Cyan
+    Write-Host "Repo: $RepoRoot"
+    Write-Host "Workspace: $workspaceRoot"
+    Write-Host "Base port: $basePort"
+    Write-Host "fastmcp: $($runtimeValidation.FastMcpVersion) (supported: $($runtimeValidation.SupportedSpec))"
+    Write-Host "uvicorn: $($runtimeValidation.UvicornVersion)"
+    Write-Host "Cloudflared: $cloudflaredExecutable"
+if (-not [string]::IsNullOrWhiteSpace($cloudflaredProtocol)) {
+    Write-Host "Cloudflared protocol: $cloudflaredProtocol"
+}
+    Write-Host ''
+
+    if ($RequestedCount -gt 0) {
+        $count = $RequestedCount
+    }
+    else {
+        $count = Read-IntWithDefault -Prompt 'How many MCP instances?' -Default $DefaultCount
+    }
+
+    if ($RequestedBasePort -gt 0) {
+        $requestedBasePort = $RequestedBasePort
+    }
+    else {
+        $requestedBasePort = Read-IntWithDefault -Prompt 'Starting port?' -Default $basePort
+    }
+}
+
+if (-not (Test-Path -LiteralPath $workspaceRoot)) {
+    throw "Workspace does not exist: $workspaceRoot"
+}
+
+$instances = @()
+$existingState = Read-LauncherState -LauncherStatePath $launcherStatePath
+if ($null -ne $existingState) {
+    $stateInstances = Convert-LauncherStateToInstances -State $existingState
+    $stateHealthy = Test-LauncherStateHealthy -State $existingState
+    $stateMatches = $false
+    if ($stateHealthy) {
+        $stateMatches = Test-LauncherStateMatchesRequest `
+            -State $existingState `
+            -RequestedCount $count `
+            -RequestedBasePort $requestedBasePort `
+            -BindHost $bindHost `
+            -WorkspaceRoot $workspaceRoot
+    }
+
+    if ($stateHealthy -and $stateMatches) {
+        Write-Host 'Reusing existing MCP instances and quick tunnels.' -ForegroundColor Green
+        $instances = $stateInstances
+    }
+    else {
+        if ($stateHealthy) {
+            Write-Host 'Existing launcher state does not match the requested configuration. Restarting managed instances...' -ForegroundColor Yellow
+        }
+        else {
+            Write-Host 'Found stale launcher state. Cleaning up stale processes...' -ForegroundColor Yellow
+        }
+        Stop-ManagedInstances -Instances $stateInstances
+        Remove-LauncherState -LauncherStatePath $launcherStatePath
+    }
+}
+
+if ($instances.Count -eq 0) {
+    $ports = @(Get-FreePorts -Count $count -StartingPort $requestedBasePort)
+    $startedInstances = New-Object System.Collections.Generic.List[object]
+
+    try {
+        for ($i = 0; $i -lt $ports.Count; $i++) {
+            $token = Get-RequestedInstanceToken -Index ($i + 1) -PrimaryToken $authToken -SecondToken $secondAuthToken
+            $instance = New-ManagedInstanceRecord `
+                -Index ($i + 1) `
+                -Port $ports[$i] `
+                -BindHost $bindHost `
+                -WorkspaceRoot $workspaceRoot `
+                -BaseStateDir $baseStateDir `
+                -AuthToken $token `
+                -LauncherInstancesDir $launcherInstancesDir
+
+            Start-ManagedServer -Instance $instance -RuntimeConfig $runtimeConfig
+            if ($i -gt 0) { Start-Sleep -Seconds 5 }
+            [void](Start-QuickTunnel -Instance $instance -RuntimeConfig $runtimeConfig)
+            [void]$startedInstances.Add($instance)
+        }
+
+        $instances = @($startedInstances.ToArray())
+    }
+    catch {
+        Stop-ManagedInstances -Instances @($startedInstances.ToArray())
+        Remove-LauncherState -LauncherStatePath $launcherStatePath
+        throw
+    }
+}
+
+Write-Host ''
+Write-Host 'Instances ready. Monitoring local health + public MCP probe...' -ForegroundColor Green
+$initialRows = @($instances | ForEach-Object { Get-InstanceStatus -Instance $_ })
+Write-LauncherState `
+    -LauncherStatePath $launcherStatePath `
+    -Instances $instances `
+    -RequestedCount $count `
+    -RequestedBasePort $requestedBasePort `
+    -BindHost $bindHost `
+    -WorkspaceRoot $workspaceRoot
+Write-StatusSnapshot `
+    -StatusPath $statusPath `
+    -Rows $initialRows `
+    -RequestedCount $count `
+    -RequestedBasePort $requestedBasePort `
+    -BindHost $bindHost `
+    -WorkspaceRoot $workspaceRoot `
+    -LauncherStatePath $launcherStatePath
+Start-Sleep -Seconds 1
+
+$cycle = 0
+while ($true) {
+    $cycle += 1
+
+    $rows = @($instances | ForEach-Object { Monitor-ManagedInstance -Instance $_ -RuntimeConfig $runtimeConfig })
+    Write-LauncherState `
+        -LauncherStatePath $launcherStatePath `
+        -Instances $instances `
+        -RequestedCount $count `
+        -RequestedBasePort $requestedBasePort `
+        -BindHost $bindHost `
+        -WorkspaceRoot $workspaceRoot
+    Write-StatusSnapshot `
+        -StatusPath $statusPath `
+        -Rows $rows `
+        -RequestedCount $count `
+        -RequestedBasePort $requestedBasePort `
+        -BindHost $bindHost `
+        -WorkspaceRoot $workspaceRoot `
+        -LauncherStatePath $launcherStatePath
+    Render-StatusPanel `
+        -Rows $rows `
+        -WorkspaceRoot $workspaceRoot `
+        -StatusPath $statusPath `
+        -LauncherStatePath $launcherStatePath
+
+    if ($NonInteractive -and $MonitorCycles -gt 0 -and $cycle -ge $MonitorCycles) {
+        break
+    }
+
+    $remainingMs = $MonitorIntervalSeconds * 1000
+    while ($remainingMs -gt 0) {
+        $command = Try-ReadPanelCommand
+        if (-not [string]::IsNullOrWhiteSpace($command)) {
+            $action = Handle-PanelCommand `
+                -Command $command `
+                -Instances $instances `
+                -LauncherStateDir $launcherStateDir `
+                -LauncherStatePath $launcherStatePath `
+                -WorkspaceRoot $workspaceRoot `
+                -StatusPath $statusPath
+            if ($action -eq 'stop') {
+                return
+            }
+            if ($action -eq 'quit') {
+                return
+            }
+            if ($action -eq 'continue' -and $command -eq 'refresh') {
+                break
+            }
+        }
+
+        $sleepMs = [Math]::Min($remainingMs, 200)
+        Start-Sleep -Milliseconds $sleepMs
+        $remainingMs -= $sleepMs
+    }
+}

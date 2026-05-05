@@ -19,6 +19,7 @@ from .config import (
     DEBUG_MCP_LOGGING,
     DELEGATE_TIMEOUT,
     GRACEFUL_SHUTDOWN_SECONDS,
+    HTTP_KEEPALIVE_TIMEOUT,
     HOST,
     OAUTH_LOGIN_TOKEN,
     OAUTH_SCOPES,
@@ -26,6 +27,7 @@ from .config import (
     PORT,
     PUBLIC_BASE_URL,
     STATE_DIR,
+    STREAM_OUTPUT_INTERVAL,
     WORKSPACE_ROOT,
     ensure_runtime_directories,
 )
@@ -409,6 +411,8 @@ async def server_info() -> dict[str, object]:
         "state_dir": str(STATE_DIR),
         "command_timeout_seconds": COMMAND_TIMEOUT,
         "delegate_timeout_seconds": DELEGATE_TIMEOUT,
+        "http_keepalive_timeout_seconds": HTTP_KEEPALIVE_TIMEOUT,
+        "stream_output_interval_seconds": STREAM_OUTPUT_INTERVAL,
         "auth": _current_oauth_config().normalized_auth_mode,
         "debug_mcp_logging": bool(DEBUG_MCP_LOGGING),
         "codex_command": CODEX_COMMAND,
@@ -820,11 +824,14 @@ def _consume_ready_fd() -> int | None:
 
 def build_uvicorn_server(*, fd: int | None = None, ready_fd: int | None = None) -> uvicorn.Server:
     app = build_http_app()
+    # None means unlimited; uvicorn needs an int, so use a very large value (~68 years).
+    effective_keepalive = HTTP_KEEPALIVE_TIMEOUT if HTTP_KEEPALIVE_TIMEOUT is not None else 2**31 - 1
     config = uvicorn.Config(
         app,
         host=HOST,
         port=PORT,
         fd=fd,
+        timeout_keep_alive=effective_keepalive,
         timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS,
     )
     return _ReadySignalServer(config, ready_fd=ready_fd)
@@ -842,6 +849,7 @@ def main(argv: list[str] | None = None) -> None:
     print("transport=streamable-http")
     print("mcp_path=/mcp")
     print(f"debug_mcp_logging={DEBUG_MCP_LOGGING}")
+    print(f"timeout_keep_alive={HTTP_KEEPALIVE_TIMEOUT}")
     print(f"graceful_shutdown_seconds={GRACEFUL_SHUTDOWN_SECONDS}")
 
     oauth_config = _current_oauth_config()

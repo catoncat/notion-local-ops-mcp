@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import stat
+import os
 from pathlib import Path
 
 from notion_local_ops_mcp.launchd_support import (
@@ -112,5 +113,9 @@ def test_write_launch_agent_locks_down_plist_permissions(tmp_path: Path) -> None
     write_launch_agent(target, payload)
 
     assert target.exists()
+    if os.name == "nt":
+        # Windows reports chmod(0o600) files as 0o666; strict POSIX mode
+        # assertions only make sense on launchd's target POSIX platforms.
+        return
     file_mode = stat.S_IMODE(target.stat().st_mode)
     assert file_mode == 0o600, f"plist mode={oct(file_mode)} (expected 0o600)"

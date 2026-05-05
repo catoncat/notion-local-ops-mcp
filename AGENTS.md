@@ -2,17 +2,17 @@
 
 ## What is this?
 
-A local MCP (Model Context Protocol) server that gives Notion AI agents the ability to operate on your local filesystem and shell. Built with **Python 3.11+** and **FastMCP**, served over SSE on `http://127.0.0.1:8766/mcp`.
+A local MCP (Model Context Protocol) server that gives Notion AI agents the ability to operate on your local filesystem and shell. Built with **Python 3.11+** and **FastMCP**, served on `http://127.0.0.1:8766/mcp` using **streamable HTTP** with a legacy SSE compatibility layer.
 
 ## Architecture
 
 ```
-Notion Agent ──SSE──▶ FastMCP Server (uvicorn)
-                          │
-          ┌───────────────┼───────────────┐
-          ▼               ▼               ▼
-    Direct Tools     Shell Tool     Delegate Tasks
-   (files/search)   (run_command)  (codex/claude-code)
+Notion Agent ──HTTP/SSE compat──▶ FastMCP Server (uvicorn)
+                                      │
+                 ┌────────────────────┼────────────────────┐
+                 ▼                    ▼                    ▼
+          Direct Tools           Shell Tool          Delegate Tasks
+       (files/search/git)   (run_command/stream)   (codex/claude-code)
 ```
 
 ### Source layout
@@ -49,6 +49,13 @@ src/notion_local_ops_mcp/
 | `cancel_task` | Cancel a running delegated task |
 | `purge_tasks` | GC old task logs under `STATE_DIR/tasks` |
 
+## Windows optional ops workflow
+
+- `scripts/launch-mcp-manager.ps1` is an optional multi-instance / quick-tunnel launcher for Windows.
+- `scripts/run-mcp-instance.ps1` starts a single MCP instance with per-instance state/log paths.
+- The repo no longer depends on a bundled `tools/cloudflared.exe`; install `cloudflared` on PATH or set `NOTION_LOCAL_OPS_CLOUDFLARED_COMMAND`.
+- Set `NOTION_LOCAL_OPS_STATUS_PATH` if you want the launcher status snapshot written somewhere other than the Desktop.
+
 ## Key concepts
 
 - **WORKSPACE_ROOT** — Relative-path anchor and default cwd only (not a sandbox boundary). Set via `NOTION_LOCAL_OPS_WORKSPACE_ROOT`; defaults to `$HOME`.
@@ -65,6 +72,8 @@ src/notion_local_ops_mcp/
 | `NOTION_LOCAL_OPS_WORKSPACE_ROOT` | `$HOME` | Root for relative path resolution |
 | `NOTION_LOCAL_OPS_STATE_DIR` | `~/.notion-local-ops-mcp` | Persistent task metadata |
 | `NOTION_LOCAL_OPS_AUTH_TOKEN` | *(empty)* | Bearer token (auth disabled if empty) |
+| `NOTION_LOCAL_OPS_CLOUDFLARED_COMMAND` | *(empty)* | Optional override for Windows launcher cloudflared executable |
+| `NOTION_LOCAL_OPS_STATUS_PATH` | Desktop `Notion-MCP-status.txt` | Optional override for Windows launcher status snapshot path |
 | `NOTION_LOCAL_OPS_CODEX_COMMAND` | `codex` | Codex CLI binary |
 | `NOTION_LOCAL_OPS_CLAUDE_COMMAND` | `claude` | Claude Code CLI binary |
 | `NOTION_LOCAL_OPS_COMMAND_TIMEOUT` | `120` | Default shell command timeout (seconds) |
@@ -78,6 +87,8 @@ src/notion_local_ops_mcp/
 cp .env.example .env   # edit values
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
+notion-local-ops-mcp   # starts the streamable-http MCP server on :8766/mcp (legacy SSE compatibility enabled)
+# optional tunnel + rolling reload workflow:
 ./scripts/dev-tunnel.sh
 # in another shell, use ./scripts/dev-tunnel.sh reload for rolling restarts
 ```

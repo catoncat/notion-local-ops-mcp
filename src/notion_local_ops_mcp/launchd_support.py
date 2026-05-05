@@ -10,6 +10,12 @@ DEFAULT_LAUNCHD_LOG_DIRNAME = "notion-local-ops-mcp"
 DEFAULT_MCP_MAX_FILES = 4096
 
 
+def _command_path(path: Path) -> str:
+    if not path.drive and path.root:
+        return path.as_posix()
+    return str(path)
+
+
 @dataclass(frozen=True)
 class LaunchdServiceConfig:
     repo_root: Path
@@ -88,7 +94,7 @@ def build_mcp_launch_agent(config: LaunchdServiceConfig) -> dict[str, Any]:
 
 def build_cloudflared_launch_agent(config: LaunchdServiceConfig) -> dict[str, Any]:
     arguments = [
-        str(config.cloudflared_bin),
+        _command_path(config.cloudflared_bin),
         "tunnel",
         "--config",
         str(config.cloudflared_config),

@@ -101,6 +101,16 @@ class TaskStore:
             self._write_text(self._stdout_path(task_id), stdout)
             self._write_text(self._stderr_path(task_id), stderr)
 
+    def append_logs(self, task_id: str, *, stdout: str = "", stderr: str = "") -> None:
+        """Append incremental output to log files (no temp-file dance)."""
+        with self._lock:
+            if stdout:
+                with self._stdout_path(task_id).open("a", encoding="utf-8") as f:
+                    f.write(stdout)
+            if stderr:
+                with self._stderr_path(task_id).open("a", encoding="utf-8") as f:
+                    f.write(stderr)
+
     def write_summary(self, task_id: str, summary: str) -> None:
         with self._lock:
             self._write_text(self._summary_path(task_id), summary)
