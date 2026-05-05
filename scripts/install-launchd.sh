@@ -15,14 +15,7 @@ fi
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/.venv/bin/activate"
 
-if ! command -v notion-local-ops-mcp >/dev/null 2>&1 || ! python - <<'PY' >/dev/null 2>&1
-import fastmcp
-import notion_local_ops_mcp.launchd_support
-import uvicorn
-PY
-then
-  python -m pip install -e .
-fi
+ensure_python_runtime_deps
 
 if [[ -z "${NOTION_LOCAL_OPS_AUTH_TOKEN:-}" ]]; then
   echo "Missing NOTION_LOCAL_OPS_AUTH_TOKEN. Set it in .env or export it before installing launchd services." >&2

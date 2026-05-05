@@ -9,8 +9,9 @@ description = "Local FastMCP server for Notion daily ops with delegate_task fall
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    # fastmcp 3.x is expected to break API (middleware, FastMCP ctor). Pin to 2.x.
-    "fastmcp>=2.12.0,<3",
+    # Keep this explicit: local launchd/dev scripts verify the live venv
+    # against pyproject.toml so stale editable metadata cannot silently drift.
+    "fastmcp>=3.2.4,<4",
     "uvicorn>=0.30.0",
 ]
 

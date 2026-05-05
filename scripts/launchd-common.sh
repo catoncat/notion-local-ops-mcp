@@ -54,6 +54,75 @@ pick_python() {
   exit 1
 }
 
+python_runtime_deps_ok() {
+  ROOT_DIR="${ROOT_DIR}" python - <<'PY' >/dev/null 2>&1
+from __future__ import annotations
+
+import sys
+from importlib.metadata import PackageNotFoundError, metadata, version
+import os
+from pathlib import Path
+
+if sys.version_info < (3, 11):
+    raise SystemExit("Python 3.11+ is required.")
+
+import tomllib
+from packaging.requirements import Requirement
+
+root = Path(os.environ["ROOT_DIR"])
+project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+dependencies = project.get("project", {}).get("dependencies", [])
+fastmcp_req = next(
+    Requirement(item)
+    for item in dependencies
+    if Requirement(item).name.lower() == "fastmcp"
+)
+
+try:
+    installed_fastmcp = version("fastmcp")
+except PackageNotFoundError as exc:
+    raise SystemExit("fastmcp is not installed") from exc
+
+if installed_fastmcp not in fastmcp_req.specifier:
+    raise SystemExit(
+        f"fastmcp {installed_fastmcp} does not satisfy {fastmcp_req.specifier}"
+    )
+
+try:
+    project_metadata = metadata("notion-local-ops-mcp")
+except PackageNotFoundError as exc:
+    raise SystemExit("notion-local-ops-mcp is not installed") from exc
+
+runtime_reqs = project_metadata.get_all("Requires-Dist") or []
+metadata_fastmcp_reqs = [
+    Requirement(item)
+    for item in runtime_reqs
+    if Requirement(item).name.lower() == "fastmcp"
+]
+expected_parts = set(str(fastmcp_req.specifier).split(","))
+metadata_parts = [
+    set(str(item.specifier).split(","))
+    for item in metadata_fastmcp_reqs
+]
+if expected_parts and expected_parts not in metadata_parts:
+    raise SystemExit(
+        "installed editable metadata has stale fastmcp requirement: "
+        + ", ".join(str(item.specifier) for item in metadata_fastmcp_reqs)
+    )
+
+import fastmcp  # noqa: F401
+import notion_local_ops_mcp.launchd_support  # noqa: F401
+import notion_local_ops_mcp.supervisor  # noqa: F401
+import uvicorn  # noqa: F401
+PY
+}
+
+ensure_python_runtime_deps() {
+  if ! command -v notion-local-ops-mcp >/dev/null 2>&1 || ! python_runtime_deps_ok; then
+    python -m pip install -e .
+  fi
+}
+
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "Missing required command: $1" >&2
