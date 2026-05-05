@@ -116,6 +116,58 @@ function Ensure-ParentDirectory {
     }
 }
 
+function Write-TextFileAtomically {
+    param(
+        [string]$Path,
+        [string]$Value
+    )
+
+    Ensure-ParentDirectory -Path $Path
+
+    $directory = Split-Path -Parent $Path
+    $leaf = Split-Path -Leaf $Path
+    $tempPath = Join-Path $directory (".{0}.{1}.{2}.tmp" -f $leaf, $PID, ([guid]::NewGuid().ToString('N')))
+    $backupPath = Join-Path $directory (".{0}.{1}.{2}.bak" -f $leaf, $PID, ([guid]::NewGuid().ToString('N')))
+
+    try {
+        Set-Content -LiteralPath $tempPath -Value $Value -Encoding UTF8
+        $written = $false
+        for ($attempt = 1; $attempt -le 20; $attempt++) {
+            try {
+                if (Test-Path -LiteralPath $Path) {
+                    [System.IO.File]::Replace($tempPath, $Path, $backupPath)
+                    if (Test-Path -LiteralPath $backupPath) {
+                        Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                else {
+                    Move-Item -LiteralPath $tempPath -Destination $Path -Force
+                }
+                $written = $true
+                break
+            }
+            catch {
+                if ($attempt -eq 20) {
+                    throw
+                }
+                Start-Sleep -Milliseconds 50
+            }
+        }
+
+        if (-not $written) {
+            throw "Failed to write file atomically: $Path"
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempPath) {
+            Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $backupPath) {
+            Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Read-IntWithDefault {
     param(
         [string]$Prompt,
@@ -318,11 +370,13 @@ function Test-LauncherRuntime {
     }
 
     $pythonScript = @'
+from __future__ import annotations
+
 import json
 import os
 import pathlib
-import re
 import sys
+from importlib.metadata import PackageNotFoundError, metadata, version
 
 repo_root = pathlib.Path(sys.argv[1])
 pyproject_path = repo_root / "pyproject.toml"
@@ -334,52 +388,81 @@ payload = {
     "error": "",
 }
 
-try:
-    text = pyproject_path.read_text(encoding="utf-8")
-    match = re.search(r'["\']fastmcp([^"\']*)["\']', text)
-    if match:
-        payload["supported_spec"] = f"fastmcp{match.group(1)}"
-except Exception as exc:  # pragma: no cover
-    payload["error"] = f"failed to read pyproject.toml: {exc}"
+
+def fail(message: str) -> None:
+    payload["error"] = message
     print(json.dumps(payload))
     raise SystemExit(0)
 
+
 try:
-    import fastmcp
-    import uvicorn
+    import tomllib
+    from packaging.requirements import Requirement
 except Exception as exc:
-    payload["error"] = f"failed to import runtime dependencies: {exc}"
-    print(json.dumps(payload))
-    raise SystemExit(0)
+    fail(f"failed to import runtime validation helpers: {exc}")
 
-fastmcp_version = os.environ.get("NOTION_LOCAL_OPS_TEST_FORCE_FASTMCP_VERSION") or getattr(fastmcp, "__version__", "")
-uvicorn_version = getattr(uvicorn, "__version__", "")
+try:
+    project = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+except Exception as exc:  # pragma: no cover
+    fail(f"failed to read pyproject.toml: {exc}")
+
+dependencies = project.get("project", {}).get("dependencies", [])
+fastmcp_req = None
+for item in dependencies:
+    req = Requirement(item)
+    if req.name.lower() == "fastmcp":
+        fastmcp_req = req
+        break
+
+if fastmcp_req is None:
+    fail("pyproject.toml does not declare a fastmcp runtime dependency")
+
+payload["supported_spec"] = str(fastmcp_req)
+
+try:
+    import fastmcp  # noqa: F401
+    import uvicorn  # noqa: F401
+except Exception as exc:
+    fail(f"failed to import runtime dependencies: {exc}")
+
+try:
+    fastmcp_version = os.environ.get("NOTION_LOCAL_OPS_TEST_FORCE_FASTMCP_VERSION") or version("fastmcp")
+    uvicorn_version = version("uvicorn")
+except PackageNotFoundError as exc:
+    fail(f"failed to read runtime package metadata: {exc}")
+
 payload["fastmcp_version"] = fastmcp_version
 payload["uvicorn_version"] = uvicorn_version
 
-min_major = None
-max_major = None
-for part in payload["supported_spec"].replace("fastmcp", "").split(","):
-    token = part.strip()
-    if token.startswith(">="):
-        min_major = int(token[2:].split(".")[0])
-    elif token.startswith("<"):
-        max_major = int(token[1:].split(".")[0])
+if fastmcp_version not in fastmcp_req.specifier:
+    fail(f"fastmcp {fastmcp_version} is outside supported range {fastmcp_req}")
 
-try:
-    actual_major = int(fastmcp_version.split(".")[0])
-except Exception:
-    payload["error"] = f"unable to parse fastmcp version: {fastmcp_version!r}"
-    print(json.dumps(payload))
-    raise SystemExit(0)
-
-if min_major is not None and actual_major < min_major:
-    payload["error"] = f"fastmcp {fastmcp_version} is below supported range {payload['supported_spec']}"
-elif max_major is not None and actual_major >= max_major:
-    payload["error"] = f"fastmcp {fastmcp_version} is outside supported range {payload['supported_spec']}"
+forced_metadata_spec = os.environ.get("NOTION_LOCAL_OPS_TEST_FORCE_FASTMCP_METADATA_SPEC")
+if forced_metadata_spec:
+    metadata_fastmcp_reqs = [Requirement(f"fastmcp{forced_metadata_spec}")]
 else:
-    payload["success"] = True
+    try:
+        project_metadata = metadata("notion-local-ops-mcp")
+    except PackageNotFoundError as exc:
+        fail(f"notion-local-ops-mcp is not installed: {exc}")
 
+    runtime_reqs = project_metadata.get_all("Requires-Dist") or []
+    metadata_fastmcp_reqs = [
+        Requirement(item)
+        for item in runtime_reqs
+        if Requirement(item).name.lower() == "fastmcp"
+    ]
+
+expected_parts = set(str(fastmcp_req.specifier).split(","))
+metadata_parts = [
+    set(str(item.specifier).split(","))
+    for item in metadata_fastmcp_reqs
+]
+if expected_parts and expected_parts not in metadata_parts:
+    actual = ", ".join(str(item.specifier) for item in metadata_fastmcp_reqs) or "<missing>"
+    fail(f"installed editable metadata has stale fastmcp requirement: {actual}")
+
+payload["success"] = True
 print(json.dumps(payload))
 '@
 
@@ -613,8 +696,7 @@ function Write-LauncherState {
         )
     }
 
-    Ensure-ParentDirectory -Path $LauncherStatePath
-    $payload | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $LauncherStatePath -Encoding UTF8
+    Write-TextFileAtomically -Path $LauncherStatePath -Value ($payload | ConvertTo-Json -Depth 6)
 }
 
 function Convert-LauncherStateToInstances {

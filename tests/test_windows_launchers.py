@@ -19,6 +19,33 @@ def _find_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _find_free_port_base_away_from(blocked_ports: set[int], *, span: int = 8) -> int:
+    while True:
+        port_base = _find_free_port()
+        if port_base + span >= 65535:
+            continue
+        if any(port in blocked_ports for port in range(port_base, port_base + span)):
+            continue
+
+        sockets: list[socket.socket] = []
+        try:
+            for port in range(port_base, port_base + span):
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                try:
+                    sock.bind(("127.0.0.1", port))
+                except OSError:
+                    sock.close()
+                    raise
+                sockets.append(sock)
+        except OSError:
+            continue
+        finally:
+            for sock in sockets:
+                sock.close()
+
+        return port_base
+
+
 def _wait_for(predicate, *, timeout: float = 20.0, interval: float = 0.2):
     deadline = time.time() + timeout
     last_value = None
@@ -33,7 +60,10 @@ def _wait_for(predicate, *, timeout: float = 20.0, interval: float = 0.2):
 def _read_json(path: Path) -> dict[str, object] | None:
     if not path.exists():
         return None
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError:
+        return None
 
 
 def _kill_process_tree(pid: int) -> None:
@@ -95,8 +125,6 @@ def _write_fake_cloudflared(
             count = state["count"]
             state_path.write_text(json.dumps(state), encoding="utf-8")
 
-            port = port_base + count - 1
-
             class Handler(http.server.BaseHTTPRequestHandler):
                 def do_GET(self):
                     self.send_response(200)
@@ -107,7 +135,12 @@ def _write_fake_cloudflared(
                 def log_message(self, fmt, *args):
                     return
 
-            server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            requested_port = port_base + count - 1
+            try:
+                server = http.server.ThreadingHTTPServer(("127.0.0.1", requested_port), Handler)
+            except OSError:
+                server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            port = int(server.server_address[1])
             stop_event = threading.Event()
 
             def _stop(*_args):
@@ -356,11 +389,13 @@ def test_run_mcp_instance_script_executes_server_and_writes_log(tmp_path: Path) 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific launcher smoke tests")
 def test_launch_manager_rebuilds_quick_tunnel_and_preserves_connection_name(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
+    base_port = _find_free_port()
+    fake_cloudflared_port_base = _find_free_port_base_away_from({base_port})
     fake_cloudflared, fake_cloudflared_state_path, fake_cloudflared_port_base = _write_fake_cloudflared(
         tmp_path,
         exit_first_after_seconds=1.2,
+        port_base=fake_cloudflared_port_base,
     )
-    base_port = _find_free_port()
     env, launcher_state_path, status_path = _launcher_env(
         repo_root,
         tmp_path,
@@ -420,11 +455,13 @@ def test_launch_manager_rebuilds_quick_tunnel_and_preserves_connection_name(tmp_
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific launcher smoke tests")
 def test_launch_manager_restarts_server_and_tunnel_when_server_dies(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
+    base_port = _find_free_port()
+    fake_cloudflared_port_base = _find_free_port_base_away_from({base_port})
     fake_cloudflared, fake_cloudflared_state_path, fake_cloudflared_port_base = _write_fake_cloudflared(
         tmp_path,
         exit_first_after_seconds=0.0,
+        port_base=fake_cloudflared_port_base,
     )
-    base_port = _find_free_port()
     env, launcher_state_path, _ = _launcher_env(
         repo_root,
         tmp_path,
@@ -467,9 +504,7 @@ def test_launch_manager_restarts_server_and_tunnel_when_server_dies(tmp_path: Pa
 def test_stop_script_closes_all_open_mcp_instances(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     base_port = _find_free_port()
-    fake_cloudflared_port_base = _find_free_port()
-    while fake_cloudflared_port_base in {base_port, base_port + 1}:
-        fake_cloudflared_port_base = _find_free_port()
+    fake_cloudflared_port_base = _find_free_port_base_away_from({base_port, base_port + 1})
     fake_cloudflared, fake_cloudflared_state_path, fake_cloudflared_port_base = _write_fake_cloudflared(
         tmp_path,
         exit_first_after_seconds=0.0,
@@ -594,7 +629,7 @@ def test_launch_manager_fails_fast_on_fastmcp_version_drift(tmp_path: Path) -> N
         fake_cloudflared_port_base,
         0.0,
         base_port,
-        extra_env={"NOTION_LOCAL_OPS_TEST_FORCE_FASTMCP_VERSION": "3.2.4"},
+        extra_env={"NOTION_LOCAL_OPS_TEST_FORCE_FASTMCP_VERSION": "3.2.3"},
     )
 
     completed = subprocess.run(
@@ -626,5 +661,57 @@ def test_launch_manager_fails_fast_on_fastmcp_version_drift(tmp_path: Path) -> N
     output = completed.stdout + completed.stderr
     assert completed.returncode != 0
     assert "outside supported range" in output
+    assert '.\\.venv\\Scripts\\python.exe -m pip install -e ".[dev]"' in output
+    assert not launcher_state_path.exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific launcher smoke tests")
+def test_launch_manager_fails_fast_on_fastmcp_metadata_drift(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    fake_cloudflared, fake_cloudflared_state_path, fake_cloudflared_port_base = _write_fake_cloudflared(
+        tmp_path,
+        exit_first_after_seconds=0.0,
+    )
+    base_port = _find_free_port()
+    env, launcher_state_path, _ = _launcher_env(
+        repo_root,
+        tmp_path,
+        fake_cloudflared,
+        fake_cloudflared_state_path,
+        fake_cloudflared_port_base,
+        0.0,
+        base_port,
+        extra_env={"NOTION_LOCAL_OPS_TEST_FORCE_FASTMCP_METADATA_SPEC": ">=2.12.0,<3"},
+    )
+
+    completed = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(repo_root / "scripts" / "launch-mcp-manager.ps1"),
+            "-RequestedCount",
+            "1",
+            "-RequestedBasePort",
+            str(base_port),
+            "-NonInteractive",
+            "-MonitorCycles",
+            "1",
+            "-MonitorIntervalSeconds",
+            "1",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+    output = completed.stdout + completed.stderr
+    assert completed.returncode != 0
+    assert "installed editable metadata has stale fastmcp requirement" in output
     assert '.\\.venv\\Scripts\\python.exe -m pip install -e ".[dev]"' in output
     assert not launcher_state_path.exists()
