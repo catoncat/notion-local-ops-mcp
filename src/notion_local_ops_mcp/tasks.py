@@ -4,12 +4,20 @@ import json
 import shutil
 import threading
 import uuid
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+# Statuses that indicate a task is not yet terminal from the perspective of
+# the persisted meta.json. After a server restart these are de-facto stale
+# and should be reaped to ``abandoned`` so consumers polling get_task /
+# wait_task don't see a zombie status forever.
+NON_TERMINAL_STATUSES = frozenset({"queued", "running"})
 
 
 class TaskStore:
@@ -117,14 +125,82 @@ class TaskStore:
         with self._lock:
             return self._summary_path(task_id).read_text(encoding="utf-8").strip()
 
-    def purge_tasks(self, *, older_than_seconds: float, dry_run: bool = False) -> dict[str, object]:
-        """Remove task directories whose ``updated_at`` is older than the threshold."""
+    def reap_stale_running_tasks(
+        self,
+        *,
+        reason: str = "server_restart",
+    ) -> dict[str, object]:
+        """Mark every persisted ``queued`` / ``running`` task as ``abandoned``.
+
+        Worker threads run as ``daemon=True`` and there is no ``try/finally``
+        guarantee that ``meta.json`` is updated when the MCP process exits
+        abruptly (launchd kill, OOM, supervisor reload, uncaught exception).
+        Without this reaper the meta would remain stuck on ``running`` forever,
+        so consumers polling ``get_task`` / ``wait_task`` see a zombie status.
+
+        Call this once at server startup. It is also safe to call manually.
+        """
+        tasks_root = self.root / "tasks"
+        reaped_ids: list[str] = []
+        scanned = 0
+        with self._lock:
+            if not tasks_root.exists():
+                return {
+                    "success": True,
+                    "scanned": 0,
+                    "reaped": 0,
+                    "task_ids": [],
+                    "reason": reason,
+                }
+            for task_dir in sorted(tasks_root.iterdir()):
+                if not task_dir.is_dir():
+                    continue
+                scanned += 1
+                meta_path = task_dir / "meta.json"
+                try:
+                    payload = json.loads(meta_path.read_text(encoding="utf-8"))
+                except Exception:
+                    # Corrupt meta is dealt with by purge, not reap.
+                    continue
+                if payload.get("status") not in NON_TERMINAL_STATUSES:
+                    continue
+                payload["status"] = "abandoned"
+                payload["abandoned_reason"] = reason
+                payload["updated_at"] = _now()
+                self._write_text(meta_path, json.dumps(payload, indent=2))
+                reaped_ids.append(task_dir.name)
+
+        return {
+            "success": True,
+            "scanned": scanned,
+            "reaped": len(reaped_ids),
+            "task_ids": reaped_ids,
+            "reason": reason,
+        }
+
+    def purge_tasks(
+        self,
+        *,
+        older_than_seconds: float,
+        dry_run: bool = False,
+        statuses: Iterable[str] | None = None,
+    ) -> dict[str, object]:
+        """Remove task directories whose ``updated_at`` is older than the threshold.
+
+        When ``statuses`` is provided, only tasks whose ``status`` is in the
+        whitelist are eligible. This lets callers narrow purges to e.g.
+        ``cancelled`` / ``failed`` / ``abandoned`` so successful task records
+        can be retained on a different schedule.
+        """
         now = datetime.now(UTC)
         cutoff = now - timedelta(seconds=max(float(older_than_seconds), 0.0))
         tasks_root = self.root / "tasks"
         scanned = 0
         purged = 0
         purged_ids: list[str] = []
+        status_filter: frozenset[str] | None = (
+            frozenset(statuses) if statuses else None
+        )
 
         with self._lock:
             if not tasks_root.exists():
@@ -135,6 +211,7 @@ class TaskStore:
                     "task_ids": [],
                     "dry_run": dry_run,
                     "cutoff": cutoff.isoformat(),
+                    "statuses": sorted(status_filter) if status_filter else None,
                 }
             for task_dir in sorted(tasks_root.iterdir()):
                 if not task_dir.is_dir():
@@ -149,10 +226,16 @@ class TaskStore:
                     updated_at = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
                     if updated_at.tzinfo is None:
                         updated_at = updated_at.replace(tzinfo=UTC)
-                    should_purge = updated_at < cutoff
+                    age_ok = updated_at < cutoff
+                    if status_filter is not None:
+                        status_ok = str(payload.get("status") or "") in status_filter
+                    else:
+                        status_ok = True
+                    should_purge = age_ok and status_ok
                 except Exception:
-                    # Corrupt/partial task directories can be cleaned up as stale.
-                    should_purge = True
+                    # Corrupt/partial task directories can be cleaned up as stale,
+                    # unless the caller has restricted purges to specific statuses.
+                    should_purge = status_filter is None
 
                 if not should_purge:
                     continue
@@ -168,4 +251,5 @@ class TaskStore:
             "task_ids": purged_ids,
             "dry_run": dry_run,
             "cutoff": cutoff.isoformat(),
+            "statuses": sorted(status_filter) if status_filter else None,
         }

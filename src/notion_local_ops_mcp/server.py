@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import threading
+import time
 
 from fastmcp import FastMCP
 import uvicorn
@@ -61,6 +63,53 @@ registry = ExecutorRegistry(
     codex_command=CODEX_COMMAND,
     claude_command=CLAUDE_COMMAND,
 )
+
+# Background auto-purge of the on-disk task store. purge_tasks used to be a
+# pure RPC tool with no scheduler, so the task directory grew unbounded.
+# Both knobs are tunable via env vars so operators can disable the loop
+# (interval <= 0) or change retention without redeploying.
+_AUTO_PURGE_INTERVAL_SECONDS = int(
+    os.environ.get("NOTION_LOCAL_OPS_AUTO_PURGE_INTERVAL_SECONDS", "3600")
+)
+_AUTO_PURGE_OLDER_HOURS = float(
+    os.environ.get("NOTION_LOCAL_OPS_AUTO_PURGE_OLDER_HOURS", str(24 * 7))
+)
+_auto_purge_thread: threading.Thread | None = None
+_auto_purge_started = threading.Event()
+
+
+def _auto_purge_loop() -> None:
+    older_than_seconds = max(_AUTO_PURGE_OLDER_HOURS, 0.0) * 3600.0
+    interval = max(_AUTO_PURGE_INTERVAL_SECONDS, 1)
+    while True:
+        try:
+            store.purge_tasks(older_than_seconds=older_than_seconds, dry_run=False)
+        except Exception as exc:
+            # Never let the cleanup thread crash the process; log to stderr.
+            print(f"[auto-purge] purge_tasks failed: {exc!r}", flush=True)
+        time.sleep(interval)
+
+
+def _start_auto_purge_thread() -> None:
+    global _auto_purge_thread
+    if _AUTO_PURGE_INTERVAL_SECONDS <= 0:
+        print("[auto-purge] disabled via NOTION_LOCAL_OPS_AUTO_PURGE_INTERVAL_SECONDS<=0", flush=True)
+        return
+    if _auto_purge_started.is_set():
+        return
+    _auto_purge_started.set()
+    _auto_purge_thread = threading.Thread(
+        target=_auto_purge_loop,
+        name="notion-local-ops-auto-purge",
+        daemon=True,
+    )
+    _auto_purge_thread.start()
+    print(
+        f"[auto-purge] started: interval={_AUTO_PURGE_INTERVAL_SECONDS}s "
+        f"older_than_hours={_AUTO_PURGE_OLDER_HOURS}",
+        flush=True,
+    )
+
 
 MCP_INSTRUCTIONS = (
     "Use direct tools first for normal tasks. Prioritize apply_patch/write_file for edits and "
@@ -415,6 +464,11 @@ async def server_info() -> dict[str, object]:
         "claude_command": CLAUDE_COMMAND,
         "tools": tools,
         "tool_count": len(tools),
+        "auto_purge": {
+            "interval_seconds": _AUTO_PURGE_INTERVAL_SECONDS,
+            "older_than_hours": _AUTO_PURGE_OLDER_HOURS,
+            "running": bool(_auto_purge_thread and _auto_purge_thread.is_alive()),
+        },
     }
 
 
@@ -750,14 +804,36 @@ def cancel_task(task_id: str) -> dict[str, object]:
     annotations=LOCAL_WRITE_TOOL,
     description=(
         "Delete old task metadata/log directories under STATE_DIR/tasks. "
-        "Defaults to 7 days; supports dry_run preview."
+        "Defaults to 7 days; supports dry_run preview. Pass `statuses` to "
+        "restrict to e.g. ['cancelled', 'failed', 'abandoned'] when you want "
+        "to keep successful task records on a different schedule."
     ),
 )
-def purge_tasks(older_than_hours: float = 24 * 7, dry_run: bool = False) -> dict[str, object]:
+def purge_tasks(
+    older_than_hours: float = 24 * 7,
+    dry_run: bool = False,
+    statuses: list[str] | None = None,
+) -> dict[str, object]:
     return store.purge_tasks(
         older_than_seconds=max(float(older_than_hours), 0.0) * 3600.0,
         dry_run=dry_run,
+        statuses=statuses,
     )
+
+
+@mcp.tool(
+    name="reap_stale_tasks",
+    title="Reap Stale Tasks",
+    annotations=LOCAL_WRITE_TOOL,
+    description=(
+        "Mark every persisted queued/running task as 'abandoned'. Useful to "
+        "clear zombie 'running' entries left over from a previous server "
+        "process that exited without updating meta.json. Runs automatically "
+        "on every server startup; expose here for manual recovery too."
+    ),
+)
+def reap_stale_tasks(reason: str = "manual") -> dict[str, object]:
+    return store.reap_stale_running_tasks(reason=reason)
 
 
 def build_http_app():
@@ -843,6 +919,21 @@ def main(argv: list[str] | None = None) -> None:
     print("mcp_path=/mcp")
     print(f"debug_mcp_logging={DEBUG_MCP_LOGGING}")
     print(f"graceful_shutdown_seconds={GRACEFUL_SHUTDOWN_SECONDS}")
+
+    # Reap zombie 'running'/'queued' tasks left over from any previous process,
+    # then start the background auto-purge loop. Both are idempotent and safe
+    # to run on every (re)start, including the supervisor's rolling reload.
+    try:
+        reap_result = store.reap_stale_running_tasks(reason="server_startup")
+        print(
+            f"[reap] scanned={reap_result.get('scanned')} "
+            f"reaped={reap_result.get('reaped')} "
+            f"reason={reap_result.get('reason')}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[reap] failed: {exc!r}", flush=True)
+    _start_auto_purge_thread()
 
     oauth_config = _current_oauth_config()
     if oauth_config.normalized_auth_mode == "oauth":
