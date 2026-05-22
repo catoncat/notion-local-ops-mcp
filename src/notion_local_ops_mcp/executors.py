@@ -50,6 +50,10 @@ def _decode_output(value: str | bytes | None) -> str:
     return value.decode("utf-8", errors="replace")
 
 
+def _decode_chunks(chunks: list[bytes]) -> str:
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
 def _command_available(command: str | None) -> bool:
     if not command:
         return False
@@ -474,6 +478,27 @@ class ExecutorRegistry:
             return
 
         self.store.update(task_id, status="running")
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        log_lock = threading.Lock()
+
+        def persist_logs() -> None:
+            self.store.write_logs(
+                task_id,
+                stdout=_decode_chunks(stdout_chunks),
+                stderr=_decode_chunks(stderr_chunks),
+            )
+
+        def read_stream(stream, chunks: list[bytes]) -> None:
+            read_chunk = getattr(stream, "read1", stream.read)
+            while True:
+                chunk = read_chunk(4096)
+                if not chunk:
+                    break
+                with log_lock:
+                    chunks.append(chunk)
+                    persist_logs()
+
         try:
             process = subprocess.Popen(
                 command,
@@ -494,14 +519,32 @@ class ExecutorRegistry:
         if cancel_event.is_set() and process.poll() is None:
             process.kill()
 
+        readers = [
+            threading.Thread(
+                target=read_stream,
+                args=(process.stdout, stdout_chunks),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=read_stream,
+                args=(process.stderr, stderr_chunks),
+                daemon=True,
+            ),
+        ]
+        for thread in readers:
+            thread.start()
+
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
+            process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             process.kill()
-            stdout, stderr = process.communicate()
-            stdout = _decode_output(stdout)
-            stderr = _decode_output(stderr)
-            self.store.write_logs(task_id, stdout=stdout, stderr=stderr)
+            process.wait()
+            for thread in readers:
+                thread.join(timeout=1)
+            with log_lock:
+                persist_logs()
+                stdout = _decode_chunks(stdout_chunks)
+                stderr = _decode_chunks(stderr_chunks)
             self.store.write_summary(task_id, _summarize(stdout, stderr))
             self.store.update(task_id, status="failed", timed_out=True)
             return
@@ -509,9 +552,12 @@ class ExecutorRegistry:
             with self._lock:
                 self._processes.pop(task_id, None)
 
-        stdout = _decode_output(stdout)
-        stderr = _decode_output(stderr)
-        self.store.write_logs(task_id, stdout=stdout, stderr=stderr)
+        for thread in readers:
+            thread.join(timeout=1)
+        with log_lock:
+            persist_logs()
+            stdout = _decode_chunks(stdout_chunks)
+            stderr = _decode_chunks(stderr_chunks)
         self.store.write_summary(task_id, _summarize(stdout, stderr))
         structured_output = _extract_structured_output(stdout) or _extract_structured_output(stderr)
 

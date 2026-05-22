@@ -69,6 +69,8 @@ src/notion_local_ops_mcp/
 | `NOTION_LOCAL_OPS_CLAUDE_COMMAND` | `claude` | Claude Code CLI binary |
 | `NOTION_LOCAL_OPS_COMMAND_TIMEOUT` | `120` | Default shell command timeout (seconds) |
 | `NOTION_LOCAL_OPS_DELEGATE_TIMEOUT` | `1800` | Default delegate task timeout (seconds) |
+| `NOTION_LOCAL_OPS_TOOL_PROFILE` | `full` | Tool exposure profile; `read-only` hides and blocks write/shell/delegate tools |
+| `NOTION_LOCAL_OPS_COMMAND_GUARD` | `off` | Optional shell risk guard; `warn` annotates and `block` rejects network-looking/destructive commands |
 | `NOTION_LOCAL_OPS_DEBUG_MCP_LOGGING` | `0` | Enable verbose MCP method/tool logging for handshake/debug sessions |
 | `NOTION_LOCAL_OPS_GRACEFUL_SHUTDOWN_SECONDS` | `30` | Graceful drain window when the rolling-reload supervisor swaps child servers |
 

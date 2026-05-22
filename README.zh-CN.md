@@ -189,6 +189,8 @@ NOTION_LOCAL_OPS_CODEX_COMMAND="codex"
 NOTION_LOCAL_OPS_CLAUDE_COMMAND="claude"
 NOTION_LOCAL_OPS_COMMAND_TIMEOUT="120"
 NOTION_LOCAL_OPS_DELEGATE_TIMEOUT="1800"
+NOTION_LOCAL_OPS_TOOL_PROFILE="full"
+NOTION_LOCAL_OPS_COMMAND_GUARD="off"
 NOTION_LOCAL_OPS_GRACEFUL_SHUTDOWN_SECONDS="30"
 NOTION_LOCAL_OPS_LAUNCHD_LABEL_PREFIX="com.notion-local-ops"
 ```
@@ -328,11 +330,18 @@ cloudflared tunnel --config ./cloudflared-example.yml run <your-tunnel-name>
 | `NOTION_LOCAL_OPS_CLAUDE_COMMAND` | 否 | `claude` |
 | `NOTION_LOCAL_OPS_COMMAND_TIMEOUT` | 否 | `120` |
 | `NOTION_LOCAL_OPS_DELEGATE_TIMEOUT` | 否 | `1800` |
+| `NOTION_LOCAL_OPS_TOOL_PROFILE` | 否 | `full`（`read-only` 会隐藏并拦截写入 / shell / delegate 工具） |
+| `NOTION_LOCAL_OPS_COMMAND_GUARD` | 否 | `off`（`warn` 标注风险 shell 命令，`block` 拒绝执行） |
 | `NOTION_LOCAL_OPS_DEBUG_MCP_LOGGING` | 否 | `0` |
 | `NOTION_LOCAL_OPS_GRACEFUL_SHUTDOWN_SECONDS` | 否 | `30` |
 | `NOTION_LOCAL_OPS_LAUNCHD_LABEL_PREFIX` | 否 | `com.notion-local-ops` |
 
 ## MCP 工具
+
+默认保持原来的本机全权限 local-ops 行为。面向远程或试用客户端时，可设置
+`NOTION_LOCAL_OPS_TOOL_PROFILE=read-only`，只允许查看文件、搜索、git 只读信息和
+task 输出，不允许写文件、跑 shell、commit、delegate、cancel 或 purge。若想打开简单
+shell 风险检查，可设置 `NOTION_LOCAL_OPS_COMMAND_GUARD=warn` 或 `block`；默认 `off` 不拦截。
 
 - `list_files`：列出文件和目录并支持分页；默认排除隐藏/噪声目录并尊重 `.gitignore`
 - `list_skills`：发现项目级和全局 skills，并返回名称与简介
@@ -350,7 +359,7 @@ cloudflared tunnel --config ./cloudflared-example.yml run <your-tunnel-name>
 - `git_show`：查看指定 commit/ref 的元信息与逐文件 diff
 - `git_blame`：查看文件（可选行区间）的逐行 blame 元数据
 - `run_command`：运行本地 shell 命令，支持后台模式
-- `run_command_stream`：启动后台 shell 任务并通过 task 轮询进度；长测试 / build / install / compile 优先走它
+- `run_command_stream`：启动后台 shell 任务并通过 task 轮询增量输出；长测试 / build / install / compile 优先走它
 - `delegate_task`：把任务交给本地 `codex` 或 `claude-code`，支持 `goal`、`acceptance_criteria`、`verification_commands`、`commit_mode`
 - `get_task`：读取后台任务状态和输出尾部
 - `wait_task`：阻塞等待后台 shell 任务或委托任务完成或超时

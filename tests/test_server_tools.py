@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 
 from notion_local_ops_mcp.executors import ExecutorRegistry
@@ -39,6 +40,33 @@ def test_server_apply_patch_tool_updates_file(tmp_path: Path) -> None:
 
     assert result["success"] is True
     assert target.read_text(encoding="utf-8") == "hello\nthere\n"
+
+
+def test_read_only_profile_blocks_mutating_tools(tmp_path: Path, monkeypatch) -> None:
+    from notion_local_ops_mcp import server
+
+    monkeypatch.setattr(server, "TOOL_PROFILE", "read-only")
+    target = tmp_path / "note.txt"
+    target.write_text("hello\nworld\n", encoding="utf-8")
+
+    result = _call(
+        server.apply_patch,
+        patch="\n".join(
+            [
+                "*** Begin Patch",
+                f"*** Update File: {target}",
+                "@@",
+                " hello",
+                "-world",
+                "+there",
+                "*** End Patch",
+            ]
+        ),
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "tool_profile_read_only"
+    assert target.read_text(encoding="utf-8") == "hello\nworld\n"
 
 
 def test_server_run_command_can_dispatch_background_tasks(tmp_path: Path) -> None:
@@ -251,6 +279,48 @@ def test_server_run_command_stream_returns_task_polling_hint(tmp_path: Path) -> 
         assert "next" in queued
         assert result["status"] == "succeeded"
         assert "stream" in result["stdout_tail"]
+    finally:
+        server.registry = old_registry
+
+
+def test_server_run_command_stream_exposes_incremental_stdout(tmp_path: Path) -> None:
+    from notion_local_ops_mcp import server
+
+    old_registry = server.registry
+    try:
+        server.registry = ExecutorRegistry(
+            store=TaskStore(tmp_path / "state"),
+            codex_command="python3 -c \"print('codex')\"",
+            claude_command="python3 -c \"print('claude')\"",
+        )
+
+        queued = _call(
+            server.run_command_stream,
+            command=(
+                "python3 -u -c \"import time; "
+                "print('first', flush=True); "
+                "time.sleep(1); "
+                "print('second', flush=True)\""
+            ),
+            cwd=str(tmp_path),
+            timeout=5,
+        )
+
+        deadline = time.monotonic() + 2
+        running = {}
+        while time.monotonic() < deadline:
+            running = _call(server.get_task, queued["task_id"])
+            if "first" in running["stdout_tail"] and running["status"] == "running":
+                break
+            time.sleep(0.05)
+
+        assert running["status"] == "running"
+        assert "first" in running["stdout_tail"]
+        assert "second" not in running["stdout_tail"]
+
+        result = _call(server.wait_task, queued["task_id"], timeout=3, poll_interval=0.05)
+        assert result["status"] == "succeeded"
+        assert "second" in result["stdout_tail"]
     finally:
         server.registry = old_registry
 

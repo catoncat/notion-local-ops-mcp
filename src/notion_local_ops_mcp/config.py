@@ -66,6 +66,8 @@ DEBUG_MCP_LOGGING = _env_flag("NOTION_LOCAL_OPS_DEBUG_MCP_LOGGING", default=Fals
 GRACEFUL_SHUTDOWN_SECONDS = int(
     os.environ.get("NOTION_LOCAL_OPS_GRACEFUL_SHUTDOWN_SECONDS", "30")
 )
+TOOL_PROFILE = os.environ.get("NOTION_LOCAL_OPS_TOOL_PROFILE", "full").strip().lower() or "full"
+COMMAND_GUARD = os.environ.get("NOTION_LOCAL_OPS_COMMAND_GUARD", "off").strip().lower() or "off"
 
 
 def ensure_runtime_directories() -> None:

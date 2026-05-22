@@ -251,6 +251,8 @@ NOTION_LOCAL_OPS_CODEX_COMMAND="codex"
 NOTION_LOCAL_OPS_CLAUDE_COMMAND="claude"
 NOTION_LOCAL_OPS_COMMAND_TIMEOUT="120"
 NOTION_LOCAL_OPS_DELEGATE_TIMEOUT="1800"
+NOTION_LOCAL_OPS_TOOL_PROFILE="full"
+NOTION_LOCAL_OPS_COMMAND_GUARD="off"
 NOTION_LOCAL_OPS_GRACEFUL_SHUTDOWN_SECONDS="30"
 NOTION_LOCAL_OPS_LAUNCHD_LABEL_PREFIX="com.notion-local-ops"
 ```
@@ -397,11 +399,20 @@ cloudflared tunnel --config ./cloudflared-example.yml run <your-tunnel-name>
 | `NOTION_LOCAL_OPS_CLAUDE_COMMAND` | no | `claude` |
 | `NOTION_LOCAL_OPS_COMMAND_TIMEOUT` | no | `120` |
 | `NOTION_LOCAL_OPS_DELEGATE_TIMEOUT` | no | `1800` |
+| `NOTION_LOCAL_OPS_TOOL_PROFILE` | no | `full` (`read-only` hides and blocks write/shell/delegate tools) |
+| `NOTION_LOCAL_OPS_COMMAND_GUARD` | no | `off` (`warn` annotates risky shell commands, `block` rejects them) |
 | `NOTION_LOCAL_OPS_DEBUG_MCP_LOGGING` | no | `0` |
 | `NOTION_LOCAL_OPS_GRACEFUL_SHUTDOWN_SECONDS` | no | `30` |
 | `NOTION_LOCAL_OPS_LAUNCHD_LABEL_PREFIX` | no | `com.notion-local-ops` |
 
 ## MCP Tools
+
+By default the server keeps the original full local-ops behavior. Set
+`NOTION_LOCAL_OPS_TOOL_PROFILE=read-only` for remote or trial clients that
+should inspect files/git/task output but not edit files, run shell commands,
+commit, delegate, cancel, or purge. Set `NOTION_LOCAL_OPS_COMMAND_GUARD=warn`
+or `block` to opt into simple shell risk checks for network-looking and
+destructive commands; `off` is the default.
 
 - `list_files`: list files and directories with pagination; excludes hidden/junk dirs and respects `.gitignore` by default
 - `list_skills`: discover project and global skills with name and description summaries
@@ -419,7 +430,7 @@ cloudflared tunnel --config ./cloudflared-example.yml run <your-tunnel-name>
 - `git_show`: inspect metadata and per-file diff for a commit/ref
 - `git_blame`: line-level blame metadata for a file/range
 - `run_command`: run local shell commands, optionally in background
-- `run_command_stream`: start a background shell job and poll output by task id; this is the preferred route for long tests/builds/installs
+- `run_command_stream`: start a background shell job and poll incremental output by task id; this is the preferred route for long tests/builds/installs
 - `delegate_task`: send a task to local `codex` or `claude-code`, with optional `goal`, `acceptance_criteria`, `verification_commands`, and `commit_mode`
 - `get_task`: read task status and output tail
 - `wait_task`: block until a delegated or background shell task completes or times out
