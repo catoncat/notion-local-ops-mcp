@@ -14,6 +14,7 @@ def test_server_info_reports_metadata_and_tools() -> None:
     payload = _call()
     assert payload["success"] is True
     assert payload["app_name"] == "notion-local-ops-mcp"
+    assert payload["tool_profile"] == "full"
     assert isinstance(payload["port"], int)
     assert isinstance(payload["workspace_root"], str)
     assert payload["auth"] in {"none", "shared_token", "oauth"}
@@ -39,3 +40,22 @@ def test_server_info_reports_metadata_and_tools() -> None:
     for removed in ["search_files", "glob_files", "grep_files", "read_file", "read_files", "replace_in_file"]:
         assert removed not in tools, f"did not expect legacy alias tool {removed}"
     assert payload["tool_count"] == len(tools)
+
+
+def test_server_info_read_only_profile_reports_only_read_tools(monkeypatch) -> None:
+    from notion_local_ops_mcp import server
+
+    monkeypatch.setattr(server, "TOOL_PROFILE", "read-only")
+
+    payload = _call()
+
+    assert payload["success"] is True
+    assert payload["tool_profile"] == "read-only"
+    assert "read_text" in payload["tools"]
+    assert "search" in payload["tools"]
+    assert "git_diff" in payload["tools"]
+    assert "apply_patch" not in payload["tools"]
+    assert "write_file" not in payload["tools"]
+    assert "run_command" not in payload["tools"]
+    assert "run_command_stream" not in payload["tools"]
+    assert "delegate_task" not in payload["tools"]

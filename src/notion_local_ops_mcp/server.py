@@ -5,8 +5,12 @@ import os
 import re
 
 from fastmcp import FastMCP
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.tools import Tool, ToolResult
+from mcp import types as mcp_types
 import uvicorn
 
+from .command_guard import evaluate_command
 from .http_compat import build_http_compat_app
 
 from .config import (
@@ -16,6 +20,7 @@ from .config import (
     CLAUDE_COMMAND,
     CODEX_COMMAND,
     COMMAND_TIMEOUT,
+    COMMAND_GUARD,
     DEBUG_MCP_LOGGING,
     DELEGATE_TIMEOUT,
     GRACEFUL_SHUTDOWN_SECONDS,
@@ -26,6 +31,7 @@ from .config import (
     PORT,
     PUBLIC_BASE_URL,
     STATE_DIR,
+    TOOL_PROFILE,
     WORKSPACE_ROOT,
     ensure_runtime_directories,
 )
@@ -70,11 +76,6 @@ MCP_INSTRUCTIONS = (
     "Use delegate_task only when direct tools are insufficient for a complex, long-running, or multi-file task."
 )
 
-mcp = FastMCP(
-    APP_NAME,
-    instructions=MCP_INSTRUCTIONS,
-)
-
 
 def _current_auth_token() -> str:
     # Resolved via module globals so tests that monkeypatch ``AUTH_TOKEN`` on
@@ -96,6 +97,124 @@ def _current_oauth_config() -> OAuthRuntimeConfig:
 
 def _current_debug_mcp_logging() -> bool:
     return bool(globals().get("DEBUG_MCP_LOGGING", False))
+
+
+READ_ONLY_TOOL_NAMES = {
+    "list_skills",
+    "list_files",
+    "search",
+    "read_text",
+    "server_info",
+    "set_default_cwd",
+    "get_default_cwd",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_show",
+    "git_blame",
+    "get_task",
+    "wait_task",
+}
+
+SUPPORTED_TOOL_PROFILES = {"full", "read-only"}
+
+
+def _current_tool_profile() -> str:
+    profile = str(globals().get("TOOL_PROFILE", "full") or "full").strip().lower()
+    return profile if profile in SUPPORTED_TOOL_PROFILES else "full"
+
+
+def _current_command_guard() -> str:
+    return str(globals().get("COMMAND_GUARD", "off") or "off")
+
+
+def _tool_profile_error(tool_name: str) -> dict[str, object]:
+    return {
+        "success": False,
+        "error": {
+            "code": "tool_profile_read_only",
+            "message": f"Tool `{tool_name}` is disabled by NOTION_LOCAL_OPS_TOOL_PROFILE=read-only.",
+        },
+        "tool": tool_name,
+        "tool_profile": _current_tool_profile(),
+    }
+
+
+def _reject_if_read_only(tool_name: str) -> dict[str, object] | None:
+    if _current_tool_profile() == "read-only" and tool_name not in READ_ONLY_TOOL_NAMES:
+        return _tool_profile_error(tool_name)
+    return None
+
+
+def _filter_tools_for_profile(tools: list[str]) -> list[str]:
+    if _current_tool_profile() != "read-only":
+        return tools
+    return [tool for tool in tools if tool in READ_ONLY_TOOL_NAMES]
+
+
+def _command_guard_error(command: str, warnings: list[dict[str, str]]) -> dict[str, object]:
+    return {
+        "success": False,
+        "error": {
+            "code": "command_guard_blocked",
+            "message": "Command was blocked by NOTION_LOCAL_OPS_COMMAND_GUARD=block.",
+            "warnings": warnings,
+        },
+        "command": command,
+        "command_guard": {
+            "mode": "block",
+            "warnings": warnings,
+        },
+    }
+
+
+def _apply_command_guard_result(
+    payload: dict[str, object],
+    *,
+    mode: str,
+    warnings: list[dict[str, str]],
+) -> dict[str, object]:
+    if not warnings:
+        return payload
+    existing = payload.get("warnings")
+    if not isinstance(existing, list):
+        existing = []
+    payload["warnings"] = [*existing, *warnings]
+    payload["command_guard"] = {
+        "mode": mode,
+        "warnings": warnings,
+    }
+    return payload
+
+
+class ToolProfileMiddleware(Middleware):
+    async def on_list_tools(
+        self,
+        context: MiddlewareContext[mcp_types.ListToolsRequest],
+        call_next: CallNext[mcp_types.ListToolsRequest, list[Tool]],
+    ) -> list[Tool]:
+        tools = list(await call_next(context))
+        if _current_tool_profile() != "read-only":
+            return tools
+        return [tool for tool in tools if tool.name in READ_ONLY_TOOL_NAMES]
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mcp_types.CallToolRequestParams],
+        call_next: CallNext[mcp_types.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        tool_name = context.message.name
+        if _reject_if_read_only(tool_name):
+            payload = _tool_profile_error(tool_name)
+            return ToolResult(structured_content=payload)
+        return await call_next(context)
+
+
+mcp = FastMCP(
+    APP_NAME,
+    instructions=MCP_INSTRUCTIONS,
+    middleware=[ToolProfileMiddleware()],
+)
 
 
 READ_ONLY_TOOL = {
@@ -351,6 +470,9 @@ def read_text(
     description="Write full content to a file (supports dry_run preview without touching disk).",
 )
 def write_file(path: str, content: str, dry_run: bool = False) -> dict[str, object]:
+    blocked = _reject_if_read_only("write_file")
+    if blocked:
+        return blocked
     target = resolve_path(path, WORKSPACE_ROOT)
     return write_file_impl(target, content=content, dry_run=dry_run)
 
@@ -371,6 +493,9 @@ def apply_patch(
     validate_only: bool = False,
     return_diff: bool = False,
 ) -> dict[str, object]:
+    blocked = _reject_if_read_only("apply_patch")
+    if blocked:
+        return blocked
     return apply_patch_impl(
         patch=patch,
         workspace_root=WORKSPACE_ROOT,
@@ -391,13 +516,13 @@ def apply_patch(
     ),
 )
 async def server_info() -> dict[str, object]:
-    list_tools = getattr(mcp, "_list_tools")
+    list_tools = getattr(mcp, "list_tools")
     try:
         registered = await list_tools()
     except TypeError:
         # fastmcp 2.14 requires a context arg; None works for server-side listing.
         registered = await list_tools(None)
-    tools = sorted(tool.name for tool in registered)
+    tools = _filter_tools_for_profile(sorted(tool.name for tool in registered))
     session_cwd = session.get_default_cwd()
     return {
         "success": True,
@@ -410,6 +535,8 @@ async def server_info() -> dict[str, object]:
         "command_timeout_seconds": COMMAND_TIMEOUT,
         "delegate_timeout_seconds": DELEGATE_TIMEOUT,
         "auth": _current_oauth_config().normalized_auth_mode,
+        "tool_profile": _current_tool_profile(),
+        "command_guard": _current_command_guard(),
         "debug_mcp_logging": bool(DEBUG_MCP_LOGGING),
         "codex_command": CODEX_COMMAND,
         "claude_command": CLAUDE_COMMAND,
@@ -546,6 +673,9 @@ def git_commit(
     sign_off: bool = False,
     dry_run: bool = False,
 ) -> dict[str, object]:
+    blocked = _reject_if_read_only("git_commit")
+    if blocked:
+        return blocked
     resolved_cwd = resolve_cwd(cwd, WORKSPACE_ROOT)
     return git_commit_impl(
         cwd=resolved_cwd,
@@ -633,19 +763,27 @@ def run_command(
     timeout: int | None = None,
     run_in_background: bool = False,
 ) -> dict[str, object]:
+    blocked = _reject_if_read_only("run_command")
+    if blocked:
+        return blocked
+    guard = evaluate_command(command, mode=_current_command_guard())
+    if not guard.allowed:
+        return _command_guard_error(command, guard.warnings)
     resolved_cwd = resolve_cwd(cwd, WORKSPACE_ROOT)
     effective_timeout = timeout if timeout is not None else COMMAND_TIMEOUT
     if run_in_background:
-        return registry.submit_command(
+        queued = registry.submit_command(
             command=command,
             cwd=resolved_cwd,
             timeout=effective_timeout,
         )
-    return run_command_impl(
+        return _apply_command_guard_result(queued, mode=guard.mode, warnings=guard.warnings)
+    result = run_command_impl(
         command=command,
         cwd=resolved_cwd,
         timeout=effective_timeout,
     )
+    return _apply_command_guard_result(result, mode=guard.mode, warnings=guard.warnings)
 
 
 @mcp.tool(
@@ -662,6 +800,12 @@ def run_command_stream(
     cwd: str | None = None,
     timeout: int | None = None,
 ) -> dict[str, object]:
+    blocked = _reject_if_read_only("run_command_stream")
+    if blocked:
+        return blocked
+    guard = evaluate_command(command, mode=_current_command_guard())
+    if not guard.allowed:
+        return _command_guard_error(command, guard.warnings)
     resolved_cwd = resolve_cwd(cwd, WORKSPACE_ROOT)
     effective_timeout = timeout if timeout is not None else COMMAND_TIMEOUT
     queued = registry.submit_command(
@@ -671,7 +815,7 @@ def run_command_stream(
     )
     queued["stream_mode"] = "task-polling"
     queued["next"] = "call get_task(task_id) or wait_task(task_id)"
-    return queued
+    return _apply_command_guard_result(queued, mode=guard.mode, warnings=guard.warnings)
 
 
 @mcp.tool(
@@ -698,6 +842,9 @@ def delegate_task(
     output_schema: dict[str, object] | None = None,
     parse_structured_output: bool = True,
 ) -> dict[str, object]:
+    blocked = _reject_if_read_only("delegate_task")
+    if blocked:
+        return blocked
     resolved_cwd = resolve_cwd(cwd, WORKSPACE_ROOT)
     return registry.submit(
         task=task,
@@ -741,6 +888,9 @@ def wait_task(task_id: str, timeout: float = 30, poll_interval: float = 0.5) -> 
     description="Cancel a delegated or background shell task if it is still running.",
 )
 def cancel_task(task_id: str) -> dict[str, object]:
+    blocked = _reject_if_read_only("cancel_task")
+    if blocked:
+        return blocked
     return registry.cancel(task_id)
 
 
@@ -754,6 +904,9 @@ def cancel_task(task_id: str) -> dict[str, object]:
     ),
 )
 def purge_tasks(older_than_hours: float = 24 * 7, dry_run: bool = False) -> dict[str, object]:
+    blocked = _reject_if_read_only("purge_tasks")
+    if blocked:
+        return blocked
     return store.purge_tasks(
         older_than_seconds=max(float(older_than_hours), 0.0) * 3600.0,
         dry_run=dry_run,
